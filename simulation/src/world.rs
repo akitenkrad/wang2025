@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 
 use rand::Rng;
 
-use socsim_core::{AgentId, SimClock, SimRng, WorldState};
+use socsim_core::{AgentId, CultureVectors, Neighbors, SimClock, SimRng, WorldState};
 use socsim_grid::{Adjacency, Boundary, CellGrid, Grid, Neighborhood};
 
 /// A single site's culture vector. `culture[i]` is the trait value (0..q) of
@@ -161,5 +161,48 @@ impl WorldState for CultureWorld {
 
     fn clock_mut(&mut self) -> &mut SimClock {
         &mut self.clock
+    }
+}
+
+// --------------------------------------------------------------------------- //
+// socsim-core capability traits → enables the reusable AxelrodMechanism
+// (socsim-social-dynamics) to drive the classical path. The mappings below are
+// exactly what the repo-local `classical_event` used: site = flat idx, feature
+// access goes through the same `CellGrid<Culture>`, neighbours come from the
+// same precomputed Von Neumann `Adjacency` — so the RNG draw order (site →
+// neighbour → interact-prob → feature) and resulting state stay byte-identical.
+// --------------------------------------------------------------------------- //
+
+impl Neighbors for CultureWorld {
+    /// Von Neumann neighbours of `id`, taken from the same precomputed CSR
+    /// [`Adjacency`] the classical mechanism uses (`adjacency.neighbors(idx)`),
+    /// in the same order — guaranteeing identical neighbour draws.
+    fn neighbors_of(&self, id: AgentId) -> Vec<AgentId> {
+        self.adjacency
+            .neighbors(id.0 as usize)
+            .iter()
+            .map(|&nb| AgentId(nb as u64))
+            .collect()
+    }
+}
+
+impl CultureVectors for CultureWorld {
+    fn n_features(&self) -> usize {
+        self.n_features
+    }
+
+    /// Read feature `f` of site `id`. Repo culture values are `usize` in `0..q`
+    /// (`q` small); the cast to `u32` is lossless.
+    fn feature(&self, id: AgentId, f: usize) -> u32 {
+        self.culture(id.0 as usize)[f] as u32
+    }
+
+    /// Overwrite feature `f` of site `id`. The `u32` value originates from a
+    /// sibling site's `usize` trait (always `< q`), so the cast back is lossless.
+    fn set_feature(&mut self, id: AgentId, f: usize, value: u32) {
+        let idx = id.0 as usize;
+        self.cells
+            .get_idx_mut(idx)
+            .expect("idx out of range (set_feature)")[f] = value as usize;
     }
 }

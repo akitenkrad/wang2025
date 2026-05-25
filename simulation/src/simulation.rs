@@ -10,8 +10,8 @@
 //!   seed / cache-hit are recorded into `run_metadata.json`.
 //!
 //! The driver picks **exactly one** interaction mechanism based on
-//! `config.provider`: `none` → [`ClassicalInteractionMechanism`] (no LLM),
-//! `ollama` / `openai` → [`LLMInteractionMechanism`].
+//! `config.provider`: `none` → [`socsim_social_dynamics::AxelrodMechanism`] (no
+//! LLM), `ollama` / `openai` → [`LLMInteractionMechanism`].
 
 use std::cell::RefCell;
 use std::fs::File;
@@ -24,12 +24,12 @@ use serde::Serialize;
 use socsim_core::{derive_seed, SimRng};
 use socsim_engine::{RandomActivationScheduler, SimulationBuilder};
 use socsim_llm::{LlmClient, MetadataCollector};
+use socsim_social_dynamics::AxelrodMechanism;
 
 use crate::config::{Config, Provider};
 use crate::llm::{build_live_client, CultureClient};
 use crate::mechanisms::{
-    ClassicalInteractionMechanism, ConvergenceMechanism, LLMInteractionMechanism, SharedClient,
-    SharedMetadata,
+    ConvergenceMechanism, LLMInteractionMechanism, SharedClient, SharedMetadata,
 };
 use crate::metrics::{compute_metrics, RunMetrics};
 use crate::world::CultureWorld;
@@ -152,8 +152,10 @@ pub fn run_with_client(
     // Pick exactly one interaction mechanism by provider.
     match (cfg.provider, &shared_client) {
         (Provider::None, _) => {
-            builder =
-                builder.add_mechanism(Box::new(ClassicalInteractionMechanism { events_per_step }));
+            // Classical (deterministic Axelrod) path now uses the reusable pack
+            // mechanism (ported from this repo's ClassicalInteractionMechanism);
+            // CultureWorld supplies the CultureVectors + Neighbors capabilities.
+            builder = builder.add_mechanism(Box::new(AxelrodMechanism::new(events_per_step)));
         }
         (_, Some(sc)) => {
             builder = builder.add_mechanism(Box::new(LLMInteractionMechanism::new(

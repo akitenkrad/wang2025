@@ -27,6 +27,13 @@ clap        = { version = "4.5", features = ["derive"] }
 socsim-core   = { git = "https://github.com/akitenkrad/rs-social-simulation-tools", branch = "main", package = "socsim-core" }
 socsim-engine = { git = "https://github.com/akitenkrad/rs-social-simulation-tools", branch = "main", package = "socsim-engine" }
 socsim-grid   = { git = "https://github.com/akitenkrad/rs-social-simulation-tools", branch = "main", package = "socsim-grid" }
+# Reusable social-dynamics mechanism pack — provides the classical Axelrod
+# cultural-dissemination mechanism (AxelrodMechanism), which was ported FROM
+# this repo's original ClassicalInteractionMechanism. The classical
+# (`--provider none`) path wires CultureWorld to this pack via the socsim-core
+# CultureVectors + Neighbors capability traits; the LLM path keeps its repo-local
+# LLMInteractionMechanism unchanged.
+socsim-social-dynamics = { git = "https://github.com/akitenkrad/rs-social-simulation-tools", branch = "main", package = "socsim-social-dynamics" }
 socsim-llm    = { git = "https://github.com/akitenkrad/rs-social-simulation-tools", branch = "main", package = "socsim-llm", features = ["live"] }
 # Output helpers (timestamp / run-dir / latest symlink / CSV・JSON writer).
 # Shared crate that consolidates library-mode boilerplate.

@@ -6,10 +6,14 @@
 //! OpenAI fallback) only inside [`LLMInteractionMechanism`].
 //!
 //! Mechanisms (mutually exclusive interaction; one chosen by `config.provider`):
-//! - [`ClassicalInteractionMechanism`] (`Interaction`): the deterministic Axelrod
-//!   baseline. 1 tick = `events_per_step` micro-events; each event picks a site +
-//!   random neighbour, computes similarity, and with probability `sim` copies one
-//!   differing feature from the neighbour. (Copies `axelrod1997`'s `run_event`.)
+//! - **classical Axelrod baseline** (`Interaction`, `--provider none`): now the
+//!   reusable [`socsim_social_dynamics::AxelrodMechanism`], wired to
+//!   [`CultureWorld`] via the `socsim-core` `CultureVectors` + `Neighbors`
+//!   capability traits. 1 tick = `events_per_step` micro-events; each event picks
+//!   a site + random neighbour, computes similarity, and with probability `sim`
+//!   copies one differing feature from the neighbour. The pack mechanism was
+//!   ported FROM this repo's former `ClassicalInteractionMechanism`, so its rule
+//!   and RNG draw order match. (No longer defined here — see `simulation.rs`.)
 //! - [`LLMInteractionMechanism`] (`Interaction`): the YuLan-OneSim variant. Same
 //!   event-driven framing, but the LLM decides whether / which feature to adopt
 //!   given persona + own culture + neighbour culture (JSON decision); the
@@ -22,94 +26,18 @@ use std::rc::Rc;
 
 use rand::Rng;
 
-use socsim_core::{AgentId, Mechanism, Phase, Result, SimRng, SocsimError, StepContext};
+use socsim_core::{AgentId, Mechanism, Phase, Result, SocsimError, StepContext};
 use socsim_llm::MetadataCollector;
 
 use crate::config::LlmSettings;
 use crate::llm::{llm_config, CultureClient};
-use crate::metrics::{global_polarization, is_stable, local_convergence, similarity};
+use crate::metrics::{global_polarization, is_stable, local_convergence};
 use crate::world::CultureWorld;
 
 /// Shared LLM client (shared between the run driver and the mechanism).
 pub type SharedClient = Rc<RefCell<CultureClient>>;
 /// Shared metadata collector (cache-hit rate etc., aggregated after the run).
 pub type SharedMetadata = Rc<RefCell<MetadataCollector>>;
-
-// --------------------------------------------------------------------------- //
-// Classical (deterministic Axelrod) interaction
-// --------------------------------------------------------------------------- //
-
-/// Run one classical Axelrod event. Returns whether a copy occurred.
-///
-/// 1. Pick an active site `s` uniformly at random.
-/// 2. Pick a neighbour `nb` uniformly from `s`'s Von Neumann neighbours.
-/// 3. Compute similarity `sim = matching_features / F`.
-/// 4. If `sim == 0` or `sim == 1`, no interaction.
-/// 5. Otherwise, with probability `sim`, copy one randomly-chosen differing
-///    feature from `nb` into `s`.
-pub fn classical_event(world: &mut CultureWorld, rng: &mut SimRng) -> bool {
-    let s = rng.gen_range(0..world.n_sites());
-    let neighbors = world.adjacency.neighbors(s);
-    if neighbors.is_empty() {
-        return false;
-    }
-    let nb = neighbors[rng.gen_range(0..neighbors.len())];
-    if s == nb {
-        return false;
-    }
-
-    let sim = similarity(world.culture(s), world.culture(nb));
-    // sim == 0: nothing in common. sim == 1: identical, nothing to copy.
-    if sim <= 0.0 || sim >= 1.0 {
-        return false;
-    }
-    // Interact with probability sim.
-    if !rng.gen_bool(sim) {
-        return false;
-    }
-
-    let diffs: Vec<usize> = (0..world.n_features)
-        .filter(|&f| world.culture(s)[f] != world.culture(nb)[f])
-        .collect();
-    debug_assert!(!diffs.is_empty()); // sim < 1 ⇒ at least one diff
-    let feat = diffs[rng.gen_range(0..diffs.len())];
-
-    let new_val = world.culture(nb)[feat];
-    world
-        .cells
-        .get_idx_mut(s)
-        .expect("idx out of range (classical_event write)")[feat] = new_val;
-    true
-}
-
-/// Deterministic Axelrod interaction mechanism (`Interaction` phase).
-///
-/// Runs `events_per_step` classical micro-events per engine tick. No LLM. This
-/// is the in-sandbox smoke / quantitative reproduction path.
-pub struct ClassicalInteractionMechanism {
-    /// Micro-events per engine tick (default = n_sites).
-    pub events_per_step: usize,
-}
-
-impl Mechanism<CultureWorld> for ClassicalInteractionMechanism {
-    fn name(&self) -> &str {
-        "classical_interaction"
-    }
-
-    fn phases(&self) -> &'static [Phase] {
-        &[Phase::Interaction]
-    }
-
-    fn apply(&mut self, _phase: Phase, ctx: &mut StepContext<'_, CultureWorld>) -> Result<()> {
-        let mut events_run = 0usize;
-        for _ in 0..self.events_per_step {
-            classical_event(ctx.world, ctx.rng);
-            events_run += 1;
-        }
-        ctx.scratch.insert("delta_events", events_run);
-        Ok(())
-    }
-}
 
 // --------------------------------------------------------------------------- //
 // LLM-driven interaction (YuLan-OneSim variant)
