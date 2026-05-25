@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 220" width="960" height="220" font-family="-apple-system, Helvetica, Arial, sans-serif">
+  <rect width="960" height="220" fill="#FAFAF8"/>
+  <text x="40" y="58" font-size="30" font-weight="700" fill="#222">YuLan-OneSim — Axelrod Culture Dissemination</text>
+  <text x="40" y="90" font-size="16" fill="#555">Wang et al. (2025) · classical (deterministic) vs LLM-driven culture adoption on one socsim WorldState</text>
+
+  <!-- mini culture grid (left): many small regions -->
+  <g transform="translate(40,115)">
+    <text x="0" y="-8" font-size="13" fill="#777">classical baseline</text>
+    <g>
+      <rect x="0"  y="0"  width="20" height="20" fill="#4c97c9"/><rect x="22" y="0"  width="20" height="20" fill="#4c97c9"/><rect x="44" y="0"  width="20" height="20" fill="#F44336"/><rect x="66" y="0"  width="20" height="20" fill="#9C27B0"/>
+      <rect x="0"  y="22" width="20" height="20" fill="#4c97c9"/><rect x="22" y="22" width="20" height="20" fill="#4c97c9"/><rect x="44" y="22" width="20" height="20" fill="#F44336"/><rect x="66" y="22" width="20" height="20" fill="#9C27B0"/>
+      <rect x="0"  y="44" width="20" height="20" fill="#66BB6A"/><rect x="22" y="44" width="20" height="20" fill="#66BB6A"/><rect x="44" y="44" width="20" height="20" fill="#F44336"/><rect x="66" y="44" width="20" height="20" fill="#FB8C00"/>
+    </g>
+  </g>
+
+  <!-- arrow -->
+  <g transform="translate(170,150)">
+    <line x1="0" y1="0" x2="60" y2="0" stroke="#999" stroke-width="2" marker-end="url(#a)"/>
+    <text x="0" y="-10" font-size="12" fill="#777">two-layer</text>
+  </g>
+
+  <!-- mini culture grid (right): larger regions -->
+  <g transform="translate(260,115)">
+    <text x="0" y="-8" font-size="13" fill="#777">LLM-driven variant</text>
+    <g>
+      <rect x="0"  y="0"  width="20" height="20" fill="#4c97c9"/><rect x="22" y="0"  width="20" height="20" fill="#4c97c9"/><rect x="44" y="0"  width="20" height="20" fill="#4c97c9"/><rect x="66" y="0"  width="20" height="20" fill="#9C27B0"/>
+      <rect x="0"  y="22" width="20" height="20" fill="#4c97c9"/><rect x="22" y="22" width="20" height="20" fill="#4c97c9"/><rect x="44" y="22" width="20" height="20" fill="#4c97c9"/><rect x="66" y="22" width="20" height="20" fill="#9C27B0"/>
+      <rect x="0"  y="44" width="20" height="20" fill="#4c97c9"/><rect x="22" y="44" width="20" height="20" fill="#4c97c9"/><rect x="44" y="44" width="20" height="20" fill="#9C27B0"/><rect x="66" y="44" width="20" height="20" fill="#9C27B0"/>
+    </g>
+  </g>
+
+  <!-- metrics legend -->
+  <g transform="translate(560,120)" font-size="14" fill="#444">
+    <text x="0" y="0" font-weight="600" fill="#222">Metrics</text>
+    <text x="0" y="24">n_stable_regions · max_region_size</text>
+    <text x="0" y="46">LC (local convergence) · GP (global polarization)</text>
+    <text x="0" y="68">determinism: socsim core + prompt→response cache</text>
+  </g>
+
+  <defs>
+    <marker id="a" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 Z" fill="#999"/>
+    </marker>
+  </defs>
+</svg>
