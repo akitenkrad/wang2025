@@ -14,7 +14,7 @@ use serde::Serialize;
 /// Interaction-mechanism provider.
 ///
 /// Selects which (mutually exclusive) interaction mechanism the driver wires:
-/// - `None`   → the reusable `socsim_social_dynamics::AxelrodMechanism`
+/// - `None`   → the reusable `socsim_mechanisms::AxelrodMechanism`
 ///   (deterministic Axelrod baseline, no LLM). This is the default and the
 ///   in-sandbox smoke path.
 /// - `Ollama` / `OpenAi` → `LLMInteractionMechanism` (LLM decides whether / which

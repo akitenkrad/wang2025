@@ -10,7 +10,7 @@
 //!   seed / cache-hit are recorded into `run_metadata.json`.
 //!
 //! The driver picks **exactly one** interaction mechanism based on
-//! `config.provider`: `none` → [`socsim_social_dynamics::AxelrodMechanism`] (no
+//! `config.provider`: `none` → [`socsim_mechanisms::AxelrodMechanism`] (no
 //! LLM), `ollama` / `openai` → [`LLMInteractionMechanism`].
 
 use std::cell::RefCell;
@@ -24,7 +24,7 @@ use serde::Serialize;
 use socsim_core::{derive_seed, SimRng};
 use socsim_engine::{RandomActivationScheduler, SimulationBuilder};
 use socsim_llm::{LlmClient, MetadataCollector};
-use socsim_social_dynamics::AxelrodMechanism;
+use socsim_mechanisms::AxelrodMechanism;
 
 use crate::config::{Config, Provider};
 use crate::llm::{build_live_client, CultureClient};

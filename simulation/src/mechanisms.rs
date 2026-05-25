@@ -7,7 +7,7 @@
 //!
 //! Mechanisms (mutually exclusive interaction; one chosen by `config.provider`):
 //! - **classical Axelrod baseline** (`Interaction`, `--provider none`): now the
-//!   reusable [`socsim_social_dynamics::AxelrodMechanism`], wired to
+//!   reusable [`socsim_mechanisms::AxelrodMechanism`], wired to
 //!   [`CultureWorld`] via the `socsim-core` `CultureVectors` + `Neighbors`
 //!   capability traits. 1 tick = `events_per_step` micro-events; each event picks
 //!   a site + random neighbour, computes similarity, and with probability `sim`

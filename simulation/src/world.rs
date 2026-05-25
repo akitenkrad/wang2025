@@ -166,7 +166,7 @@ impl WorldState for CultureWorld {
 
 // --------------------------------------------------------------------------- //
 // socsim-core capability traits → enables the reusable AxelrodMechanism
-// (socsim-social-dynamics) to drive the classical path. The mappings below are
+// (socsim-mechanisms) to drive the classical path. The mappings below are
 // exactly what the repo-local `classical_event` used: site = flat idx, feature
 // access goes through the same `CellGrid<Culture>`, neighbours come from the
 // same precomputed Von Neumann `Adjacency` — so the RNG draw order (site →
