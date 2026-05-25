@@ -17,7 +17,6 @@ csv         = "1.3"
 serde       = { version = "1.0", features = ["derive"] }
 serde_json  = "1.0"
 clap        = { version = "4.5", features = ["derive"] }
-chrono      = "0.4"
 
 # social-simulation framework (socsim) — grid ABM engine foundation.
 # The Axelrod culture-dissemination model is a fixed-site CellGrid<Culture>
@@ -29,3 +28,6 @@ socsim-core   = { git = "https://github.com/akitenkrad/rs-social-simulation-tool
 socsim-engine = { git = "https://github.com/akitenkrad/rs-social-simulation-tools", branch = "main", package = "socsim-engine" }
 socsim-grid   = { git = "https://github.com/akitenkrad/rs-social-simulation-tools", branch = "main", package = "socsim-grid" }
 socsim-llm    = { git = "https://github.com/akitenkrad/rs-social-simulation-tools", branch = "main", package = "socsim-llm", features = ["live"] }
+# Output helpers (timestamp / run-dir / latest symlink / CSV・JSON writer).
+# Shared crate that consolidates library-mode boilerplate.
+socsim-results = { git = "https://github.com/akitenkrad/rs-social-simulation-tools", branch = "main", package = "socsim-results" }

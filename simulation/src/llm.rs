@@ -22,10 +22,9 @@
 //! `impl LlmClient for Box<dyn LlmClient>` forwarding (socsim-llm issue #26)
 //! makes a dedicated newtype unnecessary.
 
-use socsim_llm::{
-    CachingClient, FallbackClient, LlmClient, LlmConfig, LlmError, OllamaClient, OpenAiClient,
-    PromptCache,
-};
+use std::path::Path;
+
+use socsim_llm::{CachingClient, LlmClient, LlmConfig, LlmError, PromptCache};
 
 use crate::config::LlmSettings;
 
@@ -45,20 +44,11 @@ pub type CultureClient = CachingClient<Box<dyn LlmClient>>;
 ///   Config error only surfaces if both backends fail).
 /// - Cache: a JSON file at `settings.cache_path` if present, else in-memory.
 pub fn build_live_client(settings: &LlmSettings) -> Result<CultureClient, LlmError> {
-    let ollama = OllamaClient::from_env();
-    let openai = OpenAiClient::from_env().unwrap_or_else(|_| {
-        let model = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o-mini".into());
-        OpenAiClient::new("", model)
-    });
-
-    let fallback = FallbackClient::new(ollama, openai);
-    let backend: Box<dyn LlmClient> = Box::new(fallback);
-
-    let cache = match &settings.cache_path {
-        Some(path) => PromptCache::open(path)?,
-        None => PromptCache::in_memory(),
-    };
-    Ok(CachingClient::new(backend, cache))
+    // The «Ollama first → OpenAI fallback → type-erase → cache» assembly is
+    // delegated to socsim-llm's `build_live_client` (behaviour is identical to the
+    // former hand-rolled implementation). This wrapper is the thin layer that
+    // accepts the replication-specific `LlmSettings` (cache_path).
+    socsim_llm::build_live_client(settings.cache_path.as_deref().map(Path::new))
 }
 
 /// Wrap any [`LlmClient`] (e.g. `mock::ScriptedClient`) in a cache to produce a

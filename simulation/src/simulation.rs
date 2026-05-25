@@ -14,7 +14,7 @@
 //! `ollama` / `openai` → [`LLMInteractionMechanism`].
 
 use std::cell::RefCell;
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::BufWriter;
 use std::rc::Rc;
 
@@ -238,7 +238,7 @@ pub fn run_with_client(
 
 /// Create the output directory.
 pub fn ensure_output_dir(output_dir: &str) {
-    fs::create_dir_all(output_dir).expect("failed to create output directory");
+    socsim_results::ensure_dir(output_dir).expect("failed to create output directory");
 }
 
 /// `metrics.csv` row (long-format, one row per round).
@@ -254,12 +254,16 @@ struct MetricsRow {
 }
 
 /// Save the per-round metrics history as long-format CSV.
+///
+/// The write mechanism is delegated to `socsim_results::write_csv` (each row is
+/// `serialize`d with a header on the first row — the standard csv-crate behaviour,
+/// byte-equivalent to the former hand-rolled writer). The row struct
+/// [`MetricsRow`] (including the `gp` / `gp_per_agent` columns) stays repo-local.
 pub fn save_metrics(result: &SimulationResult, output_dir: &str) {
-    let path = format!("{output_dir}/metrics.csv");
-    let file = File::create(&path).expect("failed to create metrics.csv");
-    let mut wtr = Writer::from_writer(BufWriter::new(file));
-    for r in &result.round_history {
-        wtr.serialize(MetricsRow {
+    let rows: Vec<MetricsRow> = result
+        .round_history
+        .iter()
+        .map(|r| MetricsRow {
             round: r.round,
             lc: r.lc,
             gp: r.gp,
@@ -268,9 +272,9 @@ pub fn save_metrics(result: &SimulationResult, output_dir: &str) {
             max_region_size: r.max_region_size,
             n_distinct_cultures: r.n_distinct_cultures,
         })
-        .expect("failed to write metrics row");
-    }
-    wtr.flush().expect("flush failed");
+        .collect();
+    let path = format!("{output_dir}/metrics.csv");
+    socsim_results::write_csv(&rows, &path).expect("failed to write metrics.csv");
 }
 
 /// Save the culture grid as CSV (one row per site: row, col, culture vector
@@ -332,10 +336,14 @@ pub fn save_run_metadata(result: &SimulationResult, cfg: &Config, output_dir: &s
                            scheduling, metrics) is deterministic given the seed. The classical \
                            provider makes zero LLM calls.",
     };
+    // pretty-print JSON is delegated to `socsim_results::write_json`
+    // (serde_json::to_writer_pretty + flush internally; byte-equivalent to the
+    // former writer). The value sources (model / endpoint / temperature / seed
+    // from result / cfg) and the `RunMetadataJson` shape are kept as-is —
+    // `MetadataCollector::summary()` is deliberately NOT used because it can
+    // change bytes on cache-hit / zero-call runs (classical makes 0 LLM calls).
     let path = format!("{output_dir}/run_metadata.json");
-    let file = File::create(&path).expect("failed to create run_metadata.json");
-    serde_json::to_writer_pretty(BufWriter::new(file), &meta)
-        .expect("failed to write run_metadata.json");
+    socsim_results::write_json(&meta, &path).expect("failed to write run_metadata.json");
 }
 
 #[cfg(test)]

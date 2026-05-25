@@ -6,13 +6,10 @@
 //!               `n_stable_regions` and LC/GP into `sweep_summary.csv`.
 //! `reproduce` : Appendix F LC/GP reproduction helper (Phase 3 stub — see below).
 
-use std::fs::{self, File};
-use std::io::BufWriter;
+use std::fs;
 use std::path::Path;
 
-use chrono::Local;
 use clap::{Parser, Subcommand};
-use csv::Writer;
 
 use culture_llm::config::{parse_provider, Config, LlmSettings};
 use culture_llm::simulation::{
@@ -20,6 +17,7 @@ use culture_llm::simulation::{
 };
 
 use socsim_core::derive_seed;
+use socsim_results::{refresh_latest_symlink, timestamp, write_csv, write_json};
 
 // --------------------------------------------------------------------------- //
 // CLI
@@ -183,18 +181,6 @@ struct SweepRow {
 // helpers
 // --------------------------------------------------------------------------- //
 
-/// Refresh the `latest` symlink (Unix only).
-fn refresh_latest(output_dir: &str, target: &str) {
-    let symlink_path = Path::new(output_dir).join("latest");
-    if symlink_path.is_symlink() || symlink_path.exists() {
-        let _ = fs::remove_file(&symlink_path);
-    }
-    #[cfg(unix)]
-    {
-        let _ = std::os::unix::fs::symlink(target, &symlink_path);
-    }
-}
-
 /// Enumerate an inclusive range with a step (min..=max).
 fn enumerate_range(min: usize, max: usize, step: usize) -> Vec<usize> {
     let mut v = Vec::new();
@@ -220,7 +206,7 @@ fn make_llm_settings(temperature: f32, llm_seed: u64, cache_path: &str) -> LlmSe
 
 fn cmd_run(args: RunArgs) {
     let provider = parse_provider(&args.provider).unwrap_or_else(|e| panic!("{e}"));
-    let timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
+    let timestamp = timestamp();
     let output_dir = format!("{}/{}", args.output_dir, timestamp);
     ensure_output_dir(&output_dir);
     if provider.is_llm() {
@@ -257,12 +243,10 @@ fn cmd_run(args: RunArgs) {
     println!("seed (base): {:?} | output: {}", base_cfg.seed, output_dir);
     println!("----------------------------------------------------------------------");
 
-    // config.json
+    // config.json (pretty-print JSON; delegated to socsim_results::write_json).
     {
         let path = format!("{output_dir}/config.json");
-        let file = File::create(&path).expect("failed to create config.json");
-        serde_json::to_writer_pretty(BufWriter::new(file), &base_cfg.to_run_config_json())
-            .expect("failed to write config.json");
+        write_json(&base_cfg.to_run_config_json(), &path).expect("failed to write config.json");
     }
 
     let mut sum_regions = 0.0f64;
@@ -317,7 +301,8 @@ fn cmd_run(args: RunArgs) {
     save_culture_grid(&result.world, &output_dir, "culture_grid_final.csv");
     save_run_metadata(&result, &base_cfg, &output_dir);
 
-    refresh_latest(&args.output_dir, &timestamp);
+    // latest symlink (best-effort; errors ignored as before).
+    let _ = refresh_latest_symlink(&args.output_dir, &timestamp);
 
     let runs = args.runs.max(1) as f64;
     println!("----------------------------------------------------------------------");
@@ -348,7 +333,7 @@ fn cmd_run(args: RunArgs) {
 
 fn cmd_sweep(args: SweepArgs) {
     let provider = parse_provider(&args.provider).unwrap_or_else(|e| panic!("{e}"));
-    let timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
+    let timestamp = timestamp();
     let dir_name = format!("{timestamp}_sweep");
     let sweep_dir = format!("{}/{}", args.output_dir, dir_name);
     fs::create_dir_all(&sweep_dir).expect("failed to create sweep dir");
@@ -395,14 +380,10 @@ fn cmd_sweep(args: SweepArgs) {
             "llm_seed": args.llm_seed,
         });
         let path = format!("{sweep_dir}/sweep_config.json");
-        let file = File::create(&path).expect("failed to create sweep_config.json");
-        serde_json::to_writer_pretty(BufWriter::new(file), &config_json)
-            .expect("failed to write sweep_config.json");
+        write_json(&config_json, &path).expect("failed to write sweep_config.json");
     }
 
-    let path = format!("{sweep_dir}/sweep_summary.csv");
-    let file = File::create(&path).expect("failed to create sweep_summary.csv");
-    let mut wtr = Writer::from_writer(BufWriter::new(file));
+    let mut summary_rows: Vec<SweepRow> = Vec::with_capacity(n_total);
 
     let mut idx = 0usize;
     for &features in &feature_vals {
@@ -433,7 +414,7 @@ fn cmd_sweep(args: SweepArgs) {
                 }
                 sum_regions += result.final_metrics.n_stable_regions as f64;
 
-                wtr.serialize(SweepRow {
+                summary_rows.push(SweepRow {
                     provider: provider.label().to_string(),
                     features,
                     traits,
@@ -449,8 +430,7 @@ fn cmd_sweep(args: SweepArgs) {
                     lc: result.final_metrics.local_convergence,
                     gp: result.final_metrics.global_polarization,
                     gp_per_agent: result.final_metrics.gp_per_agent,
-                })
-                .expect("failed to write sweep row");
+                });
             }
             let mean = sum_regions / args.runs.max(1) as f64;
             println!(
@@ -459,9 +439,14 @@ fn cmd_sweep(args: SweepArgs) {
             );
         }
     }
-    wtr.flush().expect("flush failed");
 
-    refresh_latest(&args.output_dir, &dir_name);
+    // sweep_summary.csv (each row serialized; delegated to socsim_results::write_csv).
+    {
+        let path = format!("{sweep_dir}/sweep_summary.csv");
+        write_csv(&summary_rows, &path).expect("failed to write sweep_summary.csv");
+    }
+
+    let _ = refresh_latest_symlink(&args.output_dir, &dir_name);
     println!("------------------------------------------------------------");
     println!("sweep done.");
     println!("summary → {sweep_dir}/sweep_summary.csv");
