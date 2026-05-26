@@ -63,31 +63,11 @@ pub fn parse_provider(s: &str) -> Result<Provider, String> {
 // LLM settings
 // --------------------------------------------------------------------------- //
 
-/// LLM-layer settings (temperature / seed / cache).
+/// LLM レイヤの設定 (provider / model / temperature / seed / cache)．
 ///
-/// Provider priority at runtime is fixed: «Ollama first → OpenAI fallback».
-/// Model / host / API key are passed via environment variables (`OLLAMA_HOST`,
-/// `OLLAMA_MODEL`, `OPENAI_API_KEY`, `OPENAI_MODEL`). `temperature` / `seed`
-/// pseudo-determinise the otherwise non-deterministic LLM layer.
-#[derive(Debug, Clone)]
-pub struct LlmSettings {
-    /// Generation temperature (default 0.0 for reproducibility).
-    pub temperature: f32,
-    /// Generation seed (passed to the backend; Ollama honours it, OpenAI best-effort).
-    pub seed: u64,
-    /// Prompt → response cache path (`None` = in-memory).
-    pub cache_path: Option<String>,
-}
-
-impl Default for LlmSettings {
-    fn default() -> Self {
-        LlmSettings {
-            temperature: 0.0,
-            seed: 0,
-            cache_path: None,
-        }
-    }
-}
+/// 定義は `socsim-llm` に集約済み (各 replication で同一だった struct を統合)．
+/// `crate::config::LlmSettings` パスは re-export で温存する．
+pub use socsim_llm::LlmSettings;
 
 // --------------------------------------------------------------------------- //
 // Config
