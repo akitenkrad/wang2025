@@ -68,6 +68,20 @@ pub struct RoundMetrics {
     pub n_distinct_cultures: usize,
 }
 
+/// One intermediate culture-grid snapshot (round + the board at that round).
+///
+/// Collected during the run when `config.snapshot_interval > 0` so the Python
+/// tools can render an intermediate culture-map animation / montage instead of
+/// only the final grid. The initial state (round 0) and the final round are
+/// always included.
+#[derive(Clone)]
+pub struct GridSnapshot {
+    /// Engine round (tick) at which the snapshot was taken (`0` = initial state).
+    pub round: usize,
+    /// The world (culture grid) at that round.
+    pub world: CultureWorld,
+}
+
 /// Result of a single run.
 pub struct SimulationResult {
     /// Whether the absorbing (stable) state was reached.
@@ -80,6 +94,9 @@ pub struct SimulationResult {
     pub final_metrics: RunMetrics,
     /// Final board state.
     pub world: CultureWorld,
+    /// Intermediate culture-grid snapshots (empty unless `snapshot_interval > 0`).
+    /// Always includes round 0 (initial) and the final round.
+    pub snapshots: Vec<GridSnapshot>,
     /// LLM call metadata (cache-hit rate etc.).
     pub metadata: MetadataCollector,
     /// LLM model name (run_metadata).
@@ -173,6 +190,10 @@ pub fn run_with_client(
 
     let mut sim = builder.build();
 
+    // Snapshot cadence: 0 disables intermediate snapshots (final grid only).
+    let snapshot_interval = cfg.snapshot_interval;
+    let mut snapshots: Vec<GridSnapshot> = Vec::new();
+
     // Initial-state metrics (round 0).
     let mut round_history: Vec<RoundMetrics> = Vec::new();
     {
@@ -186,6 +207,13 @@ pub fn run_with_client(
             max_region_size: m.max_region_size,
             n_distinct_cultures: m.n_distinct_cultures,
         });
+        // Round 0 is always captured when snapshots are enabled.
+        if snapshot_interval > 0 {
+            snapshots.push(GridSnapshot {
+                round: 0,
+                world: sim.world().clone(),
+            });
+        }
     }
 
     let mut converged = false;
@@ -203,6 +231,13 @@ pub fn run_with_client(
             max_region_size: m.max_region_size,
             n_distinct_cultures: m.n_distinct_cultures,
         });
+        // Intermediate snapshot at every `snapshot_interval` rounds.
+        if snapshot_interval > 0 && t.is_multiple_of(snapshot_interval) {
+            snapshots.push(GridSnapshot {
+                round: t,
+                world: report.world.clone(),
+            });
+        }
         converged = *report.scratch.get::<bool>("converged").unwrap_or(&false);
         final_round = t;
     })
@@ -222,12 +257,22 @@ pub fn run_with_client(
     let final_metrics = compute_metrics(&final_world);
     let metadata = shared_meta.borrow().clone();
 
+    // Always include the final round as the last snapshot (deduped if the final
+    // round already fell on a snapshot boundary).
+    if snapshot_interval > 0 && snapshots.last().map(|s| s.round) != Some(final_round) {
+        snapshots.push(GridSnapshot {
+            round: final_round,
+            world: final_world.clone(),
+        });
+    }
+
     Ok(SimulationResult {
         converged,
         final_round,
         round_history,
         final_metrics,
         world: final_world,
+        snapshots,
         metadata,
         llm_model,
         llm_endpoint,
@@ -346,6 +391,33 @@ pub fn save_run_metadata(result: &SimulationResult, cfg: &Config, output_dir: &s
     // change bytes on cache-hit / zero-call runs (classical makes 0 LLM calls).
     let path = format!("{output_dir}/run_metadata.json");
     socsim_results::write_json(&meta, &path).expect("failed to write run_metadata.json");
+}
+
+/// Save the intermediate culture-grid snapshots as
+/// `snapshots/culture_grid_round_<NNNNNN>.csv` (zero-padded round), plus a
+/// `snapshots/index.json` listing the rounds. No-op when there are no snapshots
+/// (`snapshot_interval == 0`). The Python `animate` tool renders these into a
+/// culture-map montage / GIF.
+pub fn save_snapshots(result: &SimulationResult, output_dir: &str) -> Vec<usize> {
+    if result.snapshots.is_empty() {
+        return Vec::new();
+    }
+    let snap_dir = format!("{output_dir}/snapshots");
+    socsim_results::ensure_dir(&snap_dir).expect("failed to create snapshots directory");
+    let mut rounds = Vec::with_capacity(result.snapshots.len());
+    for snap in &result.snapshots {
+        let name = format!("culture_grid_round_{:06}.csv", snap.round);
+        save_culture_grid(&snap.world, &snap_dir, &name);
+        rounds.push(snap.round);
+    }
+    let index = serde_json::json!({
+        "rounds": rounds,
+        "n_snapshots": rounds.len(),
+        "pattern": "culture_grid_round_{round:06}.csv",
+    });
+    let index_path = format!("{snap_dir}/index.json");
+    socsim_results::write_json(&index, &index_path).expect("failed to write snapshots/index.json");
+    rounds
 }
 
 #[cfg(test)]

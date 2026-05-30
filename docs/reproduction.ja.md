@@ -2,9 +2,21 @@
 
 # 再現
 
+## 一括再現 — `reproduce` (推奨)
+
+`reproduce` サブコマンドは付録 F / Table 7-2 の 4 条件を 1 コマンドで実行し (古典 `--provider none`・オフライン・LLM 呼び出し 0)，条件ごとの PASS/off 判定付きの観測 vs 論文サマリを書き出す:
+
+```bash
+cargo run --release -- reproduce --runs 30 --seed 42   # → results/reproduce_<ts>/reproduce_summary.json
+uv run culture-llm-tools reproduce --runs 30 --seed 42 # 同上 + 観測 vs 論文の図
+uv run culture-llm-tools reproduce --quick             # 高速エンドツーエンドスモーク
+```
+
+`reproduce_summary.json` は条件ごとに `observed_mean_regions` 対 `target_regions`，`abs_error`，`within_tolerance`，平均 LC / GP / GP-per-agent を列挙する．
+
 ## 古典ベースライン — Axelrod Table 7-2 (定量)
 
-古典プロバイダ (`--provider none`・LLM 不使用) は Axelrod (1997) Table 7-2 を再現する: 10×10 グリッドにおける安定文化地域数の平均．各条件を `--runs 30` で実行する:
+古典プロバイダ (`--provider none`・LLM 不使用) は Axelrod (1997) Table 7-2 を再現する: 10×10 グリッドにおける安定文化地域数の平均．個別条件は手動でも `--runs 30` で実行できる:
 
 ```bash
 cargo run --release -- run --provider none --width 10 --height 10 --features 5  --traits 10 --runs 30 --seed 42
@@ -35,7 +47,20 @@ LLM プロバイダは論文付録 F の振る舞いを定性的に再現する 
 
 ```bash
 OLLAMA_MODEL=llama3.2:latest cargo run --release -- run --provider ollama --width 5 --height 2 --features 5 --traits 5 --rounds 100 --seed 42
-uv run culture-llm-tools reproduce --results-dir results/latest
+uv run culture-llm-tools visualize --results-dir results/latest
+```
+
+## 古典 vs LLM — `compare`
+
+`compare` サブコマンドは古典ベースラインと LLM 変種を一致条件 (同一グリッド / シード / ラウンド) で実行し，`compare_<ts>/compare_report.json` (両者の LC / GP / regions / 収束 + 差分) を書き出す．`--mock` で決定論的スクリプト LLM クライアントを使うと比較全体がオフラインで完結する．古典側は常に実行 (LLM 呼び出し 0):
+
+```bash
+# オフライン: 古典は実行・LLM は構造的 (スクリプト mock)
+cargo run --release -- compare --mock --features 5 --traits 5 --rounds 100 --seed 42
+uv run culture-llm-tools compare-report --results-dir results/latest
+
+# 実 LLM (到達可能なバックエンドが必要)
+OLLAMA_MODEL=llama3.2:latest cargo run --release -- compare --llm-provider ollama --rounds 100 --seed 42
 ```
 
 ### GP 目標と文書化された不一致

@@ -5,6 +5,9 @@ Usage:
     culture-llm-tools visualize-sweep [...]
     culture-llm-tools show-experiment-settings [...]
     culture-llm-tools reproduce [...]
+    culture-llm-tools animate [...]
+    culture-llm-tools behavior-graph [...]
+    culture-llm-tools compare-report [...]
 
 Arguments after the subcommand are passed verbatim to that subcommand's argparse.
 Add `--help` after a subcommand for its own help.
@@ -37,8 +40,20 @@ main = build_dispatcher(
             "culture_llm_tools.show_experiment_settings:main",
         ),
         "reproduce": (
-            "Appendix F LC/GP reproduction helper (Phase 3 stub)",
+            "Appendix F / Table 7-2 batch reproduction (observed-vs-paper LC/GP + figures)",
             "culture_llm_tools.reproduce_paper:main",
+        ),
+        "animate": (
+            "intermediate culture-map animation / montage from --snapshot-interval grids",
+            "culture_llm_tools.animate:main",
+        ),
+        "behavior-graph": (
+            "render the behaviour-graph / ODD concept export (behavior_graph.json)",
+            "culture_llm_tools.behavior_graph:main",
+        ),
+        "compare-report": (
+            "classical vs LLM quantitative comparison figure (compare_report.json)",
+            "culture_llm_tools.compare_report:main",
         ),
     },
 )

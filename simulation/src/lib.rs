@@ -22,5 +22,6 @@ pub mod config;
 pub mod llm;
 pub mod mechanisms;
 pub mod metrics;
+pub mod odd;
 pub mod simulation;
 pub mod world;

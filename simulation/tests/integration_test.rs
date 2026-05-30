@@ -13,6 +13,7 @@ use culture_llm::mechanisms::{adoption_prompt, parse_adoption};
 use culture_llm::metrics::{
     compute_metrics, count_stable_regions, global_polarization, is_stable, similarity,
 };
+use culture_llm::odd::build_behavior_graph;
 use culture_llm::simulation::{run_with_client, SimulationResult};
 use culture_llm::world::CultureWorld;
 
@@ -290,4 +291,158 @@ fn adoption_prompt_contains_candidates() {
     let p = adoption_prompt("a curious person", &[0, 1, 2], &[0, 9, 9], &[], &[1, 2]);
     assert!(p.contains("differ on these feature indices: [1, 2]"));
     assert!(p.contains("a curious person"));
+}
+
+// --------------------------------------------------------------------------- //
+// snapshot emission (Wave 2): snapshot_interval > 0 collects intermediate grids
+// --------------------------------------------------------------------------- //
+
+#[test]
+fn snapshot_interval_zero_collects_no_snapshots() {
+    let cfg = classical_cfg(6, 6, 5, 8); // snapshot_interval defaults to 0
+    let result = run_with_client(&cfg, None).unwrap();
+    assert!(
+        result.snapshots.is_empty(),
+        "snapshot_interval=0 must emit no intermediate snapshots"
+    );
+}
+
+#[test]
+fn snapshot_interval_collects_round0_and_final() {
+    let mut cfg = classical_cfg(8, 8, 5, 8);
+    cfg.snapshot_interval = 2;
+    let result = run_with_client(&cfg, None).unwrap();
+    assert!(
+        result.snapshots.len() >= 2,
+        "expected at least round-0 + final snapshot, got {}",
+        result.snapshots.len()
+    );
+    // First snapshot is the initial state (round 0).
+    assert_eq!(result.snapshots.first().unwrap().round, 0);
+    // Last snapshot is the final round (always appended, deduped).
+    assert_eq!(result.snapshots.last().unwrap().round, result.final_round);
+    // All snapshot rounds are strictly increasing (no duplicates).
+    for w in result.snapshots.windows(2) {
+        assert!(
+            w[0].round < w[1].round,
+            "snapshot rounds must be increasing"
+        );
+    }
+    // Each snapshot grid has the right number of sites.
+    for s in &result.snapshots {
+        assert_eq!(s.world.n_sites(), 64);
+    }
+}
+
+// --------------------------------------------------------------------------- //
+// reproduce conditions (Wave 1): classical LC/GP are well-formed & in range
+// --------------------------------------------------------------------------- //
+
+#[test]
+fn reproduce_condition_lc_gp_are_in_range() {
+    // Mirror a reproduce condition (F5q10, 10×10) and check LC/GP invariants.
+    let mut cfg = classical_cfg(10, 10, 5, 10);
+    cfg.seed = Some(42);
+    let result = run_with_client(&cfg, None).unwrap();
+    let m = &result.final_metrics;
+    // LC is a mean of similarities → in [0, 1].
+    assert!(
+        (0.0..=1.0).contains(&m.local_convergence),
+        "LC out of range"
+    );
+    // GP = |C|/N² ≤ 1/N for N=100 → ≤ 0.01; gp_per_agent = |C|/N ≤ 1.
+    assert!(
+        m.global_polarization <= 0.01 + 1e-9,
+        "GP=|C|/N² exceeds 1/N"
+    );
+    assert!(
+        (0.0..=1.0).contains(&m.gp_per_agent),
+        "gp_per_agent out of range"
+    );
+    // gp_per_agent = N * gp by construction (|C|/N = N * |C|/N²).
+    assert!(
+        (m.gp_per_agent - 100.0 * m.global_polarization).abs() < 1e-9,
+        "gp_per_agent must equal N * gp"
+    );
+    // Classical reproduce path makes zero LLM calls.
+    assert_eq!(result.metadata.total(), 0);
+}
+
+#[test]
+fn reproduce_classical_is_bit_deterministic_across_conditions() {
+    // The reproduce driver relies on per-(F,q,run) seed derivation being
+    // reproducible: identical config → identical board.
+    for &(f, q) in &[(5usize, 10usize), (10, 10), (15, 15)] {
+        let mut cfg = classical_cfg(10, 10, f, q);
+        cfg.seed = Some(42);
+        let a = run_with_client(&cfg, None).unwrap();
+        let b = run_with_client(&cfg, None).unwrap();
+        assert_eq!(
+            a.world.cells.cells(),
+            b.world.cells.cells(),
+            "F{f}q{q}: same seed must reproduce the board exactly"
+        );
+        assert_eq!(
+            a.final_metrics.n_stable_regions,
+            b.final_metrics.n_stable_regions
+        );
+    }
+}
+
+// --------------------------------------------------------------------------- //
+// compare harness (Wave 3): classical vs mock-LLM run on a matched config
+// --------------------------------------------------------------------------- //
+
+#[test]
+fn compare_classical_vs_mock_llm_runs_on_matched_config() {
+    // Matched grid / seed / rounds; classical side makes 0 LLM calls, the
+    // mock-LLM side records calls. This mirrors the `compare --mock` harness.
+    let classical_cfg = Config {
+        width: 5,
+        height: 4,
+        features: 5,
+        traits: 5,
+        rounds: 100,
+        provider: Provider::None,
+        seed: Some(42),
+        ..Config::default()
+    };
+    let classical = run_with_client(&classical_cfg, None).unwrap();
+    assert_eq!(classical.metadata.total(), 0, "classical: 0 LLM calls");
+
+    let llm_cfg = Config {
+        provider: Provider::Ollama,
+        ..classical_cfg.clone()
+    };
+    let llm = run_with_client(&llm_cfg, Some(always_adopt_first_client())).unwrap();
+    assert!(
+        llm.metadata.total() > 0,
+        "mock-LLM side should record calls"
+    );
+    // Both sides expose the same metric shape for a direct comparison.
+    assert!((0.0..=1.0).contains(&classical.final_metrics.local_convergence));
+    assert!((0.0..=1.0).contains(&llm.final_metrics.local_convergence));
+}
+
+// --------------------------------------------------------------------------- //
+// behaviour-graph / ODD export (Wave 2): variant-dependent structure
+// --------------------------------------------------------------------------- //
+
+#[test]
+fn behavior_graph_variant_depends_on_provider() {
+    let classical = build_behavior_graph(&Config {
+        provider: Provider::None,
+        ..Config::default()
+    });
+    assert!(!classical.nodes.iter().any(|n| n.id == "event_llm_decision"));
+
+    let llm = build_behavior_graph(&Config {
+        provider: Provider::Ollama,
+        ..Config::default()
+    });
+    assert!(llm.nodes.iter().any(|n| n.id == "event_llm_decision"));
+    assert!(llm.nodes.len() > classical.nodes.len());
+    // The ODD protocol always has all seven sections populated.
+    assert!(!llm.odd.purpose.is_empty());
+    assert!(!llm.odd.submodels.is_empty());
 }

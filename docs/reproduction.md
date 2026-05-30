@@ -2,9 +2,21 @@
 
 # Reproduction
 
+## Batch reproduction — `reproduce` (recommended)
+
+The `reproduce` subcommand runs all four Appendix F / Table 7-2 conditions in one command (classical `--provider none`, offline, 0 LLM calls) and writes a machine-readable observed-vs-paper summary with a PASS/off verdict per condition:
+
+```bash
+cargo run --release -- reproduce --runs 30 --seed 42   # → results/reproduce_<ts>/reproduce_summary.json
+uv run culture-llm-tools reproduce --runs 30 --seed 42 # same, plus observed-vs-paper figures
+uv run culture-llm-tools reproduce --quick             # fast end-to-end smoke
+```
+
+`reproduce_summary.json` lists, per condition, `observed_mean_regions` vs `target_regions`, `abs_error`, `within_tolerance`, and the mean LC / GP / GP-per-agent.
+
 ## Classical baseline — Axelrod Table 7-2 (quantitative)
 
-The classical provider (`--provider none`, no LLM) reproduces Axelrod (1997) Table 7-2: the mean number of stable culture regions on a 10×10 grid. Run each condition with `--runs 30`:
+The classical provider (`--provider none`, no LLM) reproduces Axelrod (1997) Table 7-2: the mean number of stable culture regions on a 10×10 grid. The individual conditions can also be run by hand with `--runs 30`:
 
 ```bash
 cargo run --release -- run --provider none --width 10 --height 10 --features 5  --traits 10 --runs 30 --seed 42
@@ -35,7 +47,20 @@ The LLM provider reproduces the paper's Appendix F behaviour qualitatively (the 
 
 ```bash
 OLLAMA_MODEL=llama3.2:latest cargo run --release -- run --provider ollama --width 5 --height 2 --features 5 --traits 5 --rounds 100 --seed 42
-uv run culture-llm-tools reproduce --results-dir results/latest
+uv run culture-llm-tools visualize --results-dir results/latest
+```
+
+## Classical vs LLM — `compare`
+
+The `compare` subcommand runs the classical baseline and the LLM variant on a matched config (same grid / seed / rounds) and writes `compare_<ts>/compare_report.json` (both sides' LC / GP / regions / convergence + deltas). `--mock` substitutes a deterministic scripted LLM client so the comparison runs end-to-end offline; the classical side always runs live (0 LLM calls):
+
+```bash
+# offline: classical live, LLM structural (scripted mock)
+cargo run --release -- compare --mock --features 5 --traits 5 --rounds 100 --seed 42
+uv run culture-llm-tools compare-report --results-dir results/latest
+
+# live LLM (requires a reachable backend)
+OLLAMA_MODEL=llama3.2:latest cargo run --release -- compare --llm-provider ollama --rounds 100 --seed 42
 ```
 
 ### The GP target and the documented inconsistency

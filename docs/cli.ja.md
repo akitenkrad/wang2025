@@ -2,7 +2,7 @@
 
 # CLI リファレンス
 
-バイナリ: `culture-llm`．サブコマンド: `run`, `sweep`, `reproduce`．
+バイナリ: `culture-llm`．サブコマンド: `run`, `sweep`, `reproduce`, `compare`．
 
 ## `run`
 
@@ -33,7 +33,12 @@ cargo run --release -- run --provider none --width 10 --height 10 --features 5 -
 
 # LLM 変種・小グリッド・Ollama 第一候補
 OLLAMA_MODEL=llama3.2:latest cargo run --release -- run --provider ollama --width 5 --height 2 --features 5 --traits 5 --rounds 100 --seed 42
+
+# 中間文化グリッドのスナップショット (アニメーション用)
+cargo run --release -- run --provider none --width 10 --height 10 --features 5 --traits 8 --snapshot-interval 50 --seed 42
 ```
+
+`run` は毎回 `behavior_graph.json` (モデルから導出した行動グラフ / ODD 概念エクスポート) も書き出す．`--snapshot-interval N > 0` のとき，中間文化グリッドを `snapshots/culture_grid_round_<NNNNNN>.csv` (`snapshots/index.json` で索引付け) に書き出す．ラウンド 0 と最終ラウンドは常に含む．
 
 ## `sweep`
 
@@ -62,10 +67,43 @@ cargo run --release -- sweep --provider none \
 
 ## `reproduce`
 
-付録 F LC/GP 再現ヘルパ (Phase 3 スタブ)．推奨する古典 / LLM コマンドを表示する．Python 側の `culture-llm-tools reproduce` が run の LC/GP を付録 F 目標と比較する．
+付録 F / Axelrod Table 7-2 一括再現．4 条件 (F5q10, F5q15, F10q10, F15q15) を 10×10 グリッドで各 `--runs` 回 (古典 `--provider none`・オフライン・LLM 呼び出し 0) 実行し，`reproduce_summary.json` (観測平均 `n_stable_regions` 対 論文目標値・条件ごとの PASS/off 判定 + 平均 LC / GP / GP-per-agent) と `reproduce_detail.csv` (条件×試行の行) を書き出す．Python の `culture-llm-tools reproduce` が観測 vs 論文の図を `figures/` に描画する．
+
+| フラグ | 既定 | 意味 |
+|------|---------|---------|
+| `--provider` | `none` | 古典ベースライン (オフライン検証可) |
+| `--runs` | `30` | 条件あたり試行数 (平均) |
+| `--rounds` | `20000` | 試行あたり最大エンジン tick 数 |
+| `--seed` | `42` | シード基底 (試行ごとに独立シード派生) |
+| `--quick` | off | 高速スモーク (`runs=5`, `rounds ≤ 5000`)・検証用ではない |
+| `--output-dir` | `results` | `reproduce_<ts>/` をここに書き出す |
 
 ```bash
-cargo run --release -- reproduce
+cargo run --release -- reproduce --runs 30 --seed 42
+cargo run --release -- reproduce --quick          # 高速エンドツーエンドスモーク
+```
+
+## `compare`
+
+古典 (`--provider none`) 対 LLM の定量比較を **一致条件** (同一グリッド / シード / ラウンド) で実行．`compare_report.json` に両者の主要指標 (`n_stable_regions`, LC, GP, GP-per-agent, 収束, LLM 呼び出し / cache-hit 数) と差分を書き出す．`--mock` で LLM 側を決定論的スクリプトクライアント (ネットワーク不要) にすると比較全体がオフラインで完結する．`--mock` なしでは LLM 側は実 env 構築クライアント．
+
+| フラグ | 既定 | 意味 |
+|------|---------|---------|
+| `--llm-provider` | `ollama` | 古典ベースラインと比較する LLM プロバイダ |
+| `--mock` | off | 決定論的スクリプト LLM クライアント (オフライン; CI / サンドボックス) |
+| `--width` / `--height` | `5` / `4` | 一致グリッドサイズ |
+| `--features` / `--traits` | `5` / `5` | 一致 `F` / `q` |
+| `--rounds` | `100` | 最大エンジン tick 数 |
+| `--seed` | `42` | 共有シード (両側) |
+| `--temperature` / `--llm-seed` / `--cache-path` | `run` と同じ | LLM 設定 (実経路) |
+| `--output-dir` | `results` | `compare_<ts>/` をここに書き出す |
+
+```bash
+# オフライン (スクリプト mock LLM): 古典は実行・LLM は構造的
+cargo run --release -- compare --mock --features 5 --traits 5 --rounds 100 --seed 42
+
+# 実 LLM (到達可能な Ollama / OpenAI バックエンドが必要)
+OLLAMA_MODEL=llama3.2:latest cargo run --release -- compare --llm-provider ollama --rounds 100 --seed 42
 ```
 
 ---

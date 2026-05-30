@@ -43,11 +43,21 @@ cargo run --release -- sweep --provider none \
     --traits-min   5 --traits-max   15 --traits-step   5 \
     --runs 30 --seed 42
 
+# === 付録 F / Table 7-2 一括再現 (古典・オフライン) ===
+cargo run --release -- reproduce --runs 30 --seed 42        # 観測 vs 論文 LC/GP + PASS/off
+
+# === 古典 vs LLM 定量比較 (オフライン mock LLM) ===
+cargo run --release -- compare --mock --features 5 --traits 5 --rounds 100 --seed 42
+
 # Python 可視化ツール (ワークスペースルートで)
 uv sync
 uv run culture-llm-tools visualize                 # 文化マップ + LC/GP 時系列
 uv run culture-llm-tools visualize-sweep           # F×q ヒートマップ
 uv run culture-llm-tools show-experiment-settings  # config / sweep_config / run_metadata
+uv run culture-llm-tools reproduce                 # Table 7-2 観測 vs 論文の図
+uv run culture-llm-tools animate                   # 中間文化マップアニメ / モンタージュ
+uv run culture-llm-tools behavior-graph            # 行動グラフ / ODD 概念図
+uv run culture-llm-tools compare-report            # 古典 vs LLM 比較図
 ```
 
 LLM **パイプライン** のオフライン (LLM 不要) スモークは scripted mock クライアント経由で実行できる:
@@ -58,10 +68,10 @@ cargo run --release --example mock_smoke -- results
 
 ## ドキュメント
 
-- [アーキテクチャ](docs/architecture.ja.md) — 世界状態・メカニズム・二層決定論・GP の不一致注記
-- [CLI リファレンス](docs/cli.ja.md) — `run` / `sweep` / `reproduce` のフラグ
-- [再現](docs/reproduction.ja.md) — Axelrod Table 7-2 の数値・付録 F LC/GP
-- [可視化](docs/visualization.ja.md) — Python ツールと出力
+- [アーキテクチャ](docs/architecture.ja.md) — 世界状態・メカニズム・二層決定論・スナップショット・行動グラフ / ODD 概念エクスポート・GP の不一致注記
+- [CLI リファレンス](docs/cli.ja.md) — `run` / `sweep` / `reproduce` / `compare` のフラグ
+- [再現](docs/reproduction.ja.md) — Axelrod Table 7-2 の数値・付録 F LC/GP・`reproduce` / `compare` ハーネス
+- [可視化](docs/visualization.ja.md) — Python ツールと出力 (`animate`・`behavior-graph`・`compare-report` を含む)
 
 ## 参考文献
 

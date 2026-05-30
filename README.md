@@ -43,11 +43,21 @@ cargo run --release -- sweep --provider none \
     --traits-min   5 --traits-max   15 --traits-step   5 \
     --runs 30 --seed 42
 
+# === Appendix F / Table 7-2 batch reproduction (classical, offline) ===
+cargo run --release -- reproduce --runs 30 --seed 42        # observed-vs-paper LC/GP + PASS/off
+
+# === Classical vs LLM quantitative comparison (offline mock LLM) ===
+cargo run --release -- compare --mock --features 5 --traits 5 --rounds 100 --seed 42
+
 # Python visualization tools (at the workspace root)
 uv sync
 uv run culture-llm-tools visualize                 # culture map + LC/GP time series
 uv run culture-llm-tools visualize-sweep           # F×q heatmaps
 uv run culture-llm-tools show-experiment-settings  # config / sweep_config / run_metadata
+uv run culture-llm-tools reproduce                 # Table 7-2 observed-vs-paper figures
+uv run culture-llm-tools animate                   # intermediate culture-map animation / montage
+uv run culture-llm-tools behavior-graph            # behaviour-graph / ODD concept diagram
+uv run culture-llm-tools compare-report            # classical-vs-LLM comparison figure
 ```
 
 An offline (LLM-free) smoke of the LLM **pipeline** is available via a scripted mock client:
@@ -58,10 +68,10 @@ cargo run --release --example mock_smoke -- results
 
 ## Documentation
 
-- [Architecture](docs/architecture.md) — world state, mechanisms, two-layer determinism, the GP inconsistency note
-- [CLI reference](docs/cli.md) — `run` / `sweep` / `reproduce` flags
-- [Reproduction](docs/reproduction.md) — Axelrod Table 7-2 numbers, Appendix F LC/GP
-- [Visualization](docs/visualization.md) — the Python tools and their outputs
+- [Architecture](docs/architecture.md) — world state, mechanisms, two-layer determinism, snapshots, the behaviour-graph / ODD concept export, the GP inconsistency note
+- [CLI reference](docs/cli.md) — `run` / `sweep` / `reproduce` / `compare` flags
+- [Reproduction](docs/reproduction.md) — Axelrod Table 7-2 numbers, Appendix F LC/GP, the `reproduce` / `compare` harnesses
+- [Visualization](docs/visualization.md) — the Python tools and their outputs (incl. `animate`, `behavior-graph`, `compare-report`)
 
 ## References
 

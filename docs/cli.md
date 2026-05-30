@@ -2,7 +2,7 @@
 
 # CLI reference
 
-Binary: `culture-llm`. Subcommands: `run`, `sweep`, `reproduce`.
+Binary: `culture-llm`. Subcommands: `run`, `sweep`, `reproduce`, `compare`.
 
 ## `run`
 
@@ -33,7 +33,12 @@ cargo run --release -- run --provider none --width 10 --height 10 --features 5 -
 
 # LLM variant, small grid, Ollama first
 OLLAMA_MODEL=llama3.2:latest cargo run --release -- run --provider ollama --width 5 --height 2 --features 5 --traits 5 --rounds 100 --seed 42
+
+# intermediate culture-grid snapshots (for the animation tool)
+cargo run --release -- run --provider none --width 10 --height 10 --features 5 --traits 8 --snapshot-interval 50 --seed 42
 ```
+
+Every `run` also writes `behavior_graph.json` (the behaviour-graph / ODD concept export, derived from the model). With `--snapshot-interval N > 0` it writes intermediate culture grids to `snapshots/culture_grid_round_<NNNNNN>.csv` (indexed by `snapshots/index.json`), always including round 0 and the final round.
 
 ## `sweep`
 
@@ -62,10 +67,43 @@ cargo run --release -- sweep --provider none \
 
 ## `reproduce`
 
-Appendix F LC/GP reproduction helper (Phase 3 stub). Prints the recommended classical / LLM commands; the Python-side `culture-llm-tools reproduce` checks a run's LC/GP against the Appendix F targets.
+Appendix F / Axelrod Table 7-2 batch reproduction. Runs the four conditions (F5q10, F5q15, F10q10, F15q15) on a 10×10 grid for `--runs` runs each (classical `--provider none`, offline, 0 LLM calls), and writes `reproduce_summary.json` (observed mean `n_stable_regions` vs the published target, with a PASS/off verdict per condition + mean LC / GP / GP-per-agent) plus `reproduce_detail.csv` (per-condition per-run rows). The Python `culture-llm-tools reproduce` renders the observed-vs-paper figures into `figures/`.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--provider` | `none` | classical baseline (offline-verifiable) |
+| `--runs` | `30` | runs per condition (averaged) |
+| `--rounds` | `20000` | maximum engine ticks per run |
+| `--seed` | `42` | seed base (each run derives an independent seed) |
+| `--quick` | off | fast smoke (`runs=5`, `rounds ≤ 5000`) — not for validation |
+| `--output-dir` | `results` | writes `reproduce_<ts>/` here |
 
 ```bash
-cargo run --release -- reproduce
+cargo run --release -- reproduce --runs 30 --seed 42
+cargo run --release -- reproduce --quick          # fast end-to-end smoke
+```
+
+## `compare`
+
+Classical (`--provider none`) vs LLM quantitative comparison on a **matched** config (same grid / seed / rounds). Writes `compare_report.json` with both sides' headline metrics (`n_stable_regions`, LC, GP, GP-per-agent, convergence, LLM-call / cache-hit counts) and their deltas. Pass `--mock` to run the LLM side with a deterministic scripted client (no network), so the comparison runs end-to-end offline; without `--mock` the LLM side is the live env-built client.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--llm-provider` | `ollama` | LLM provider to compare against the classical baseline |
+| `--mock` | off | deterministic scripted LLM client (offline; CI / sandbox) |
+| `--width` / `--height` | `5` / `4` | matched grid size |
+| `--features` / `--traits` | `5` / `5` | matched `F` / `q` |
+| `--rounds` | `100` | maximum engine ticks |
+| `--seed` | `42` | shared seed (both sides) |
+| `--temperature` / `--llm-seed` / `--cache-path` | as `run` | LLM settings (live path) |
+| `--output-dir` | `results` | writes `compare_<ts>/` here |
+
+```bash
+# offline (scripted mock LLM): classical live + LLM structural
+cargo run --release -- compare --mock --features 5 --traits 5 --rounds 100 --seed 42
+
+# live LLM (requires a reachable Ollama / OpenAI backend)
+OLLAMA_MODEL=llama3.2:latest cargo run --release -- compare --llm-provider ollama --rounds 100 --seed 42
 ```
 
 ---
