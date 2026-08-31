@@ -16,12 +16,19 @@
 //!
 //! Modules: world state (`world`), interaction + convergence mechanisms
 //! (`mechanisms`), LLM client layer (`llm`), run/sweep driver (`simulation`),
-//! aggregate metrics (`metrics`), and configuration (`config`).
+//! aggregate metrics (`metrics`), configuration (`config`), and the runvault
+//! recording layer (`record`).
+//!
+//! Where the results go is runvault's business: `Run::start` names and creates
+//! the run directory, and the experiment writes its own tables under that run's
+//! `artifacts/`. Nothing here makes a timestamped directory or a `latest`
+//! symlink of its own.
 
 pub mod config;
 pub mod llm;
 pub mod mechanisms;
 pub mod metrics;
 pub mod odd;
+pub mod record;
 pub mod simulation;
 pub mod world;

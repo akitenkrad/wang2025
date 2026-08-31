@@ -23,7 +23,7 @@
 | `--temperature` | `0.0` | LLM 生成温度 |
 | `--llm-seed` | `0` | LLM 生成シード (バックエンド) |
 | `--cache-path` | `.llm_cache/cache.json` | プロンプト→応答キャッシュ (LLM 経路) |
-| `--output-dir` | `results` | 出力ベースディレクトリ |
+| `--output-dir` | `results` | results ルート (runvault が `<root>/culture-llm/<run_slug>/` に書く) |
 
 例:
 
@@ -38,11 +38,13 @@ OLLAMA_MODEL=llama3.2:latest cargo run --release -- run --provider ollama --widt
 cargo run --release -- run --provider none --width 10 --height 10 --features 5 --traits 8 --snapshot-interval 50 --seed 42
 ```
 
-`run` は毎回 `behavior_graph.json` (モデルから導出した行動グラフ / ODD 概念エクスポート) も書き出す．`--snapshot-interval N > 0` のとき，中間文化グリッドを `snapshots/culture_grid_round_<NNNNNN>.csv` (`snapshots/index.json` で索引付け) に書き出す．ラウンド 0 と最終ラウンドは常に含む．
+`run` は毎回 `artifacts/behavior_graph.json` (モデルから導出した行動グラフ / ODD 概念エクスポート) も書き出す．`--snapshot-interval N > 0` のとき，中間文化グリッドを `artifacts/snapshots/culture_grid_round_<NNNNNN>.csv` (`artifacts/snapshots/index.json` で索引付け) に書き出す．ラウンド 0 と最終ラウンドは常に含む．
+
+`--runs N` は N 本回して **最後の 1 本**の詳細を記録する (移行前と同じ)．どの試行が残るかを決めるので `runs` は条件の一部であり `parameters` に入れてある．`master_seed` はその試行を実際に支配したシード，`replicate_index` は `N-1` で，コマンドラインで与えた根のシードは `/parameters.seed` に残る．`--seed` を省いてもシードが失われることは無くなった — 1 つ引いて記録し，それを使う．
 
 ## `sweep`
 
-特徴数 `F` × 特性数 `q` を走査し，`n_stable_regions` / LC / GP を `sweep_summary.csv` に集計する．
+特徴数 `F` × 特性数 `q` を走査する．グリッド定義を持つ掃引親 run (`subcommand=sweep`) 1 本と，**`(F, q)` セルごとの子 run** (`subcommand=sweep-point`) からなる．各セルの `runs` 本の試行は子の `events.jsonl` の `terminal` 行 1 本ずつになり，セルの集約 (`n_units`, `mean_n_stable_regions`, `mean_lc` ほか) は子の run スコープ指標になる．`sweep_summary.csv` は書かない — 1 行 1 試行の表は `culture-llm-tools visualize-sweep` が子から組み直す．
 
 | フラグ | 既定 | 意味 |
 |------|---------|---------|
@@ -56,7 +58,7 @@ cargo run --release -- run --provider none --width 10 --height 10 --features 5 -
 | `--snapshot-interval` | `10` | sweep_config に記録 |
 | `--seed` | `42` | シード基点 (各 run で独立に派生) |
 | `--temperature` / `--llm-seed` / `--cache-path` | `run` と同じ | LLM 設定 |
-| `--output-dir` | `results` | 出力ベースディレクトリ |
+| `--output-dir` | `results` | results ルート (runvault が `<root>/culture-llm/<run_slug>/` に書く) |
 
 ```bash
 cargo run --release -- sweep --provider none \
@@ -67,7 +69,7 @@ cargo run --release -- sweep --provider none \
 
 ## `reproduce`
 
-付録 F / Axelrod Table 7-2 一括再現．4 条件 (F5q10, F5q15, F10q10, F15q15) を 10×10 グリッドで各 `--runs` 回 (古典 `--provider none`・オフライン・LLM 呼び出し 0) 実行し，`reproduce_summary.json` (観測平均 `n_stable_regions` 対 論文目標値・条件ごとの PASS/off 判定 + 平均 LC / GP / GP-per-agent) と `reproduce_detail.csv` (条件×試行の行) を書き出す．Python の `culture-llm-tools reproduce` が観測 vs 論文の図を `figures/` に描画する．
+付録 F / Axelrod Table 7-2 一括再現．4 条件 (F5q10, F5q15, F10q10, F15q15) を 10×10 グリッドで各 `--runs` 回 (古典 `--provider none`・オフライン・LLM 呼び出し 0) 実行し，親 run 1 本 + **条件ごとの子 run** (`subcommand=reproduce-condition`) の形で記録する．子は試行を `terminal` 行に，条件の平均を run スコープ指標 (`mean_n_stable_regions`, `mean_lc` ほか) に，Axelrod の報告値を出典つきで `reference.csv` に持つ．許容幅と PASS/off の判定は論文のものではなくこちらが置いたものなので，親の `artifacts/reproduce_verdicts.csv` とコンソールに残す．Python の `culture-llm-tools reproduce` が観測 vs 論文の図を親の隣に描画する．
 
 | フラグ | 既定 | 意味 |
 |------|---------|---------|
@@ -76,7 +78,7 @@ cargo run --release -- sweep --provider none \
 | `--rounds` | `20000` | 試行あたり最大エンジン tick 数 |
 | `--seed` | `42` | シード基底 (試行ごとに独立シード派生) |
 | `--quick` | off | 高速スモーク (`runs=5`, `rounds ≤ 5000`)・検証用ではない |
-| `--output-dir` | `results` | `reproduce_<ts>/` をここに書き出す |
+| `--output-dir` | `results` | results ルート |
 
 ```bash
 cargo run --release -- reproduce --runs 30 --seed 42
@@ -85,7 +87,7 @@ cargo run --release -- reproduce --quick          # 高速エンドツーエン�
 
 ## `compare`
 
-古典 (`--provider none`) 対 LLM の定量比較を **一致条件** (同一グリッド / シード / ラウンド) で実行．`compare_report.json` に両者の主要指標 (`n_stable_regions`, LC, GP, GP-per-agent, 収束, LLM 呼び出し / cache-hit 数) と差分を書き出す．`--mock` で LLM 側を決定論的スクリプトクライアント (ネットワーク不要) にすると比較全体がオフラインで完結する．`--mock` なしでは LLM 側は実 env 構築クライアント．
+古典 (`--provider none`) 対 LLM の定量比較を **一致条件** (同一グリッド / シード / ラウンド) で実行．親 run (`subcommand=compare`) 1 本 + **片側ごとの子 run** (`subcommand=compare-side`) の形にする．両側とも «同じ盤面を機構だけ変えて回した 1 本のシミュレーション» なので，それぞれが自分のラウンドごとの `metrics.csv`・自分の `terminal` 行・(LLM 側は) 自分の `llm` ブロックを持つ．差 (`delta_n_stable_regions`, `delta_lc`, `delta_gp`, `delta_gp_per_agent`, `delta_final_round`) は親の `scope=sweep` 指標に 1 度だけ置く．`--mock` で LLM 側を決定論的スクリプトクライアント (ネットワーク不要) にすると比較全体がオフラインで完結する．`--mock` なしでは LLM 側は実 env 構築クライアント．
 
 | フラグ | 既定 | 意味 |
 |------|---------|---------|
@@ -96,7 +98,7 @@ cargo run --release -- reproduce --quick          # 高速エンドツーエン�
 | `--rounds` | `100` | 最大エンジン tick 数 |
 | `--seed` | `42` | 共有シード (両側) |
 | `--temperature` / `--llm-seed` / `--cache-path` | `run` と同じ | LLM 設定 (実経路) |
-| `--output-dir` | `results` | `compare_<ts>/` をここに書き出す |
+| `--output-dir` | `results` | results ルート |
 
 ```bash
 # オフライン (スクリプト mock LLM): 古典は実行・LLM は構造的

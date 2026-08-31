@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """visualize_sweep.py — F×q sweep visualization for the culture-dissemination model.
 
-Reads a `sweep` results directory (default `results/latest`) and produces:
-  - sweep_heatmap.png    : F×q heatmap of mean n_stable_regions
-  - sweep_lc_gp.png      : F×q heatmaps of mean LC and mean GP
-If multiple providers are present in sweep_summary.csv, a classical-vs-LLM
-comparison panel is added.
+Reads a runvault `sweep` parent and produces:
+  - sweep_heatmap.png : F×q heatmap of mean n_stable_regions
+  - sweep_lc_gp.png   : F×q heatmaps of mean LC and mean GP
+
+The one-row-per-trial table is rebuilt from the sweep parent's children
+(`subcommand=sweep-point`): runvault keeps no `sweep_summary.csv` on disk, and a
+heatmap of *means over trials* needs the individual trials, which live in each
+child's `events.jsonl`. A pre-runvault `sweep_summary.csv` is still read as it
+stands.
 
 Usage:
     uv run culture-llm-tools visualize-sweep
-    uv run culture-llm-tools visualize-sweep --results-dir results/latest --output-dir out
+    uv run culture-llm-tools visualize-sweep --sweep-dir "$(runvault path --experiment culture-llm --latest --subcommand sweep)"
 """
 
 from __future__ import annotations
@@ -20,8 +24,32 @@ import os
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from runvault.read import figures_dir, runvault_path, sweep_events_table
+
+EXPERIMENT = "culture-llm"
 
 COLOR_BG = "#FAFAF8"
+
+
+def load_summary(sweep_dir: str) -> pd.DataFrame:
+    """One row per trial (`provider`, `features`, `traits`, final metrics).
+
+    The condition columns come from each child's `parameters`; the trial columns
+    from its terminal events. Only `provider` / `features` / `traits` are asked
+    for as parameter columns — `sweep_events_table` overwrites an event column
+    with a same-named parameter column, so the terminal's own `seed` must not be
+    shadowed (the conditions call the base seed `base_seed` for exactly that
+    reason).
+    """
+    legacy = os.path.join(sweep_dir, "sweep_summary.csv")
+    if os.path.exists(legacy):
+        return pd.read_csv(legacy)
+
+    df = sweep_events_table(sweep_dir, ["provider", "features", "traits"], kind="terminal")
+    df["run"] = df["unit_id"].str.removeprefix("trial-").astype(int)
+    df["converged"] = ~df["censored"]
+    df["final_round"] = df["t"]
+    return df
 
 
 def _pivot(df: pd.DataFrame, value: str) -> tuple[np.ndarray, list[int], list[int]]:
@@ -54,19 +82,31 @@ def _heatmap(ax, mat, feats, traits, title, cmap="viridis") -> None:
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="culture-llm-tools visualize-sweep")
-    parser.add_argument("--results-dir", default="results/latest")
-    parser.add_argument("--output-dir", default=None)
+    parser.add_argument(
+        "--sweep-dir", "--sweep_dir", "--results-dir", "--results_dir", default=None,
+        help=(
+            "掃引親 run のディレクトリ．未指定時は runvault に最新の掃引を聞く "
+            "(--experiment culture-llm --subcommand sweep)．"
+        ),
+    )
+    parser.add_argument(
+        "--results-root", "--results_root", default="results",
+        help="--sweep-dir 未指定時に runvault が探す results ルート (default: results)",
+    )
+    parser.add_argument(
+        "--output-dir", "--output_dir", default=None,
+        help="図の保存先 (default: results/culture-llm/figures/{run_slug})",
+    )
     args = parser.parse_args(argv)
 
-    results_dir = args.results_dir
-    output_dir = args.output_dir or results_dir
+    sweep_dir = args.sweep_dir
+    if sweep_dir is None:
+        sweep_dir = runvault_path(EXPERIMENT, args.results_root, subcommand="sweep")
+    output_dir = args.output_dir or figures_dir(sweep_dir)
     os.makedirs(output_dir, exist_ok=True)
 
-    path = os.path.join(results_dir, "sweep_summary.csv")
-    if not os.path.exists(path):
-        print(f"[visualize-sweep] no sweep_summary.csv at {path}")
-        return
-    df = pd.read_csv(path)
+    print(f"[visualize-sweep] sweep: {sweep_dir}")
+    df = load_summary(sweep_dir)
     providers = sorted(df["provider"].unique()) if "provider" in df.columns else ["none"]
 
     # n_stable_regions heatmap (per provider if multiple).

@@ -200,9 +200,13 @@ pub fn build_behavior_graph(cfg: &Config) -> BehaviorGraph {
 }
 
 /// Write the behaviour graph to `behavior_graph.json` under `output_dir`.
+///
+/// `output_dir` is the run's `artifacts/`: the export is a structured document
+/// derived from the config, not a measurement, so it is a table-shaped artefact
+/// rather than a metric.
 pub fn save_behavior_graph(graph: &BehaviorGraph, output_dir: &str) {
-    let path = format!("{output_dir}/behavior_graph.json");
-    socsim_results::write_json(graph, &path).expect("failed to write behavior_graph.json");
+    let path = std::path::PathBuf::from(format!("{output_dir}/behavior_graph.json"));
+    crate::simulation::write_json(graph, &path);
 }
 
 #[cfg(test)]

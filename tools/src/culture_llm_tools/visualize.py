@@ -1,24 +1,41 @@
 #!/usr/bin/env python3
 """visualize.py — single-run visualization for the culture-dissemination model.
 
-Reads a `run` results directory (default `results/latest`) and produces:
-  - culture_map.png   : the final culture grid coloured by distinct culture profile
+Reads a runvault `run` directory and produces:
+  - culture_map.png      : the final culture grid coloured by distinct culture profile
   - lc_gp_timeseries.png : LC and GP (and the auxiliary GP/N) per round
+
+Which run is asked of runvault when `--results-dir` is omitted
+(`runvault path --experiment culture-llm --latest --subcommand run --standalone`);
+`results/` is never scanned for a directory that looks recent.
+
+The figures go *beside* the run (`results/culture-llm/figures/<run_slug>/`):
+`manifest.csv` is settled by `finish()`, so anything added to the run afterwards
+would carry no hash.
 
 Usage:
     uv run culture-llm-tools visualize
-    uv run culture-llm-tools visualize --results-dir results/latest --output-dir out
+    uv run culture-llm-tools visualize --results-dir "$(runvault path --experiment culture-llm --latest --subcommand run --standalone)"
+    uv run culture-llm-tools visualize --output-dir out
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import os
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from runvault.read import (
+    artifacts_dir,
+    config_parameters,
+    figures_dir,
+    metrics_wide,
+    runvault_path,
+)
+
+EXPERIMENT = "culture-llm"
 
 COLOR_BG = "#FAFAF8"
 COLOR_LC = "#4c97c9"
@@ -26,20 +43,27 @@ COLOR_GP = "#F44336"
 COLOR_GPN = "#9C27B0"
 
 # Appendix F targets (LLM variant): LC exceeds 0.50 by ~round 60; GP ~0.35-0.40.
+# Read off Figure 9 rather than printed as a table, which is why they annotate the
+# plot instead of sitting in the run's `reference.csv`.
 LC_TARGET = 0.50
 GP_BAND = (0.35, 0.40)
 
 
-def load_config(results_dir: str) -> dict | None:
-    path = os.path.join(results_dir, "config.json")
-    if os.path.exists(path):
-        with open(path, encoding="utf-8") as f:
-            return json.load(f)
-    return None
+def load_metrics(run_dir: str) -> pd.DataFrame:
+    """Per-round metrics as one row per round.
+
+    runvault's `metrics.csv` is long, so `metrics_wide` turns it back. The time
+    axis is `step` there and `round` in this model's own vocabulary; a legacy wide
+    `metrics.csv` already has a `round` column and is left alone.
+    """
+    df = metrics_wide(os.path.join(run_dir, "metrics.csv"))
+    if "step" in df.columns and "round" not in df.columns:
+        df = df.rename(columns={"step": "round"})
+    return df
 
 
-def plot_culture_map(results_dir: str, output_dir: str, cfg: dict | None) -> None:
-    path = os.path.join(results_dir, "culture_grid_final.csv")
+def plot_culture_map(run_dir: str, output_dir: str, cfg: dict | None) -> None:
+    path = os.path.join(artifacts_dir(run_dir), "culture_grid_final.csv")
     if not os.path.exists(path):
         print(f"[visualize] no culture grid at {path}; skipping culture map")
         return
@@ -69,12 +93,11 @@ def plot_culture_map(results_dir: str, output_dir: str, cfg: dict | None) -> Non
     print(f"[visualize] wrote {out}  ({len(uniq)} distinct cultures)")
 
 
-def plot_timeseries(results_dir: str, output_dir: str) -> None:
-    path = os.path.join(results_dir, "metrics.csv")
-    if not os.path.exists(path):
-        print(f"[visualize] no metrics at {path}; skipping time series")
+def plot_timeseries(run_dir: str, output_dir: str) -> None:
+    if not os.path.exists(os.path.join(run_dir, "metrics.csv")):
+        print(f"[visualize] no metrics in {run_dir}; skipping time series")
         return
-    df = pd.read_csv(path)
+    df = load_metrics(run_dir)
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4.5))
     fig.patch.set_facecolor(COLOR_BG)
@@ -106,17 +129,35 @@ def plot_timeseries(results_dir: str, output_dir: str) -> None:
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="culture-llm-tools visualize")
-    parser.add_argument("--results-dir", default="results/latest")
-    parser.add_argument("--output-dir", default=None)
+    parser.add_argument(
+        "--results-dir", "--results_dir", default=None,
+        help=(
+            "runvault の run ディレクトリ．未指定時は runvault に最新の run を聞く "
+            "(--experiment culture-llm --subcommand run --standalone)．"
+        ),
+    )
+    parser.add_argument(
+        "--results-root", "--results_root", default="results",
+        help="--results-dir 未指定時に runvault が探す results ルート (default: results)",
+    )
+    parser.add_argument(
+        "--output-dir", "--output_dir", default=None,
+        help="図の保存先 (default: results/culture-llm/figures/{run_slug})",
+    )
     args = parser.parse_args(argv)
 
-    results_dir = args.results_dir
-    output_dir = args.output_dir or results_dir
+    run_dir = args.results_dir
+    if run_dir is None:
+        run_dir = runvault_path(
+            EXPERIMENT, args.results_root, subcommand="run", standalone=True
+        )
+    output_dir = args.output_dir or figures_dir(run_dir)
     os.makedirs(output_dir, exist_ok=True)
 
-    cfg = load_config(results_dir)
-    plot_culture_map(results_dir, output_dir, cfg)
-    plot_timeseries(results_dir, output_dir)
+    print(f"[visualize] run: {run_dir}")
+    cfg = config_parameters(run_dir, required=False)
+    plot_culture_map(run_dir, output_dir, cfg)
+    plot_timeseries(run_dir, output_dir)
 
 
 if __name__ == "__main__":

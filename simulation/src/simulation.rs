@@ -6,8 +6,9 @@
 //!   &[1])` seeds the engine RNG (= site/neighbour draws). Bit-reproducible.
 //! - **upper (non-deterministic LLM)**: confined to [`crate::llm`]'s cached
 //!   Ollama→OpenAI fallback client, pseudo-determinised via `temperature=0` /
-//!   fixed `seed` + the prompt→response cache. Model / endpoint / temperature /
-//!   seed / cache-hit are recorded into `run_metadata.json`.
+//!   fixed `seed` + the prompt→response cache. Model / provider / temperature go
+//!   into the run's `llm` block and the call counts into its run-scope metrics
+//!   (see [`crate::record`]); this module only carries them out of the run.
 //!
 //! The driver picks **exactly one** interaction mechanism based on
 //! `config.provider`: `none` → [`socsim_mechanisms::AxelrodMechanism`] (no
@@ -16,10 +17,10 @@
 use std::cell::RefCell;
 use std::fs::File;
 use std::io::BufWriter;
+use std::path::Path;
 use std::rc::Rc;
 
 use csv::Writer;
-use serde::Serialize;
 
 use socsim_core::{derive_seed, SimRng};
 use socsim_engine::{RandomActivationScheduler, SimulationBuilder};
@@ -27,7 +28,7 @@ use socsim_llm::{LlmClient, MetadataCollector};
 use socsim_mechanisms::AxelrodMechanism;
 
 use crate::config::{Config, Provider};
-use crate::llm::{build_live_client, CultureClient};
+use crate::llm::CultureClient;
 use crate::mechanisms::{
     ConvergenceMechanism, LLMInteractionMechanism, SharedClient, SharedMetadata,
 };
@@ -99,9 +100,9 @@ pub struct SimulationResult {
     pub snapshots: Vec<GridSnapshot>,
     /// LLM call metadata (cache-hit rate etc.).
     pub metadata: MetadataCollector,
-    /// LLM model name (run_metadata).
+    /// LLM model name (goes into the run's `llm` block).
     pub llm_model: String,
-    /// LLM endpoint (run_metadata; primary).
+    /// LLM endpoint (primary; classifies the provider in the `llm` block).
     pub llm_endpoint: String,
 }
 
@@ -122,26 +123,33 @@ pub fn init_world(cfg: &Config, rng: &mut SimRng) -> CultureWorld {
     world
 }
 
-/// Run the simulation, building the production LLM client from environment
-/// variables (only used when `provider` is an LLM provider).
-pub fn run(cfg: &Config) -> Result<SimulationResult, String> {
-    if cfg.provider.is_llm() {
-        let client =
-            build_live_client(&cfg.llm).map_err(|e| format!("LLM client build failed: {e}"))?;
-        run_with_client(cfg, Some(client))
-    } else {
-        run_with_client(cfg, None)
-    }
-}
-
 /// Run the simulation with an optional pre-built [`CultureClient`].
 ///
 /// `client = None` runs the classical (no-LLM) path. `client = Some(_)` runs the
-/// LLM path with the supplied client (production via [`build_live_client`], tests
-/// via [`crate::llm::wrap_client`] over a `ScriptedClient`).
+/// LLM path with the supplied client (production via
+/// [`crate::llm::build_live_client`], tests via [`crate::llm::wrap_client`] over
+/// a `ScriptedClient`).
+///
+/// There is deliberately **no** entry point that builds the client itself: the
+/// model name and the endpoint are known only to whoever built it, and they are
+/// what fills `run.json`'s `llm` block. An entry point that hid the construction
+/// would let a run be recorded with that block empty.
 pub fn run_with_client(
     cfg: &Config,
     client: Option<CultureClient>,
+) -> Result<SimulationResult, String> {
+    run_with_shared_client(cfg, client.map(|c| Rc::new(RefCell::new(c))))
+}
+
+/// The same, with a client that outlives one run.
+///
+/// A driver that runs several trials in a row builds the client once and hands
+/// the same handle to each: the prompt cache then stays warm across trials
+/// exactly as it did when every trial rebuilt the client from the same
+/// file-backed cache.
+pub fn run_with_shared_client(
+    cfg: &Config,
+    client: Option<SharedClient>,
 ) -> Result<SimulationResult, String> {
     let root = cfg.seed.unwrap_or_else(rand::random);
     let events_per_step = cfg.effective_events_per_step();
@@ -155,9 +163,14 @@ pub fn run_with_client(
     let (llm_model, llm_endpoint, shared_client): (String, String, Option<SharedClient>) =
         match client {
             Some(c) => {
-                let model = c.inner().model().to_string();
-                let endpoint = c.inner().endpoint().to_string();
-                (model, endpoint, Some(Rc::new(RefCell::new(c))))
+                let (model, endpoint) = {
+                    let borrowed = c.borrow();
+                    (
+                        borrowed.inner().model().to_string(),
+                        borrowed.inner().endpoint().to_string(),
+                    )
+                };
+                (model, endpoint, Some(c))
             }
             None => ("none".to_string(), "none".to_string(), None),
         };
@@ -283,49 +296,30 @@ pub fn run_with_client(
 // Output writers
 // --------------------------------------------------------------------------- //
 
-/// Create the output directory.
+/// Create the output directory (the run's `artifacts/`).
 pub fn ensure_output_dir(output_dir: &str) {
-    socsim_results::ensure_dir(output_dir).expect("failed to create output directory");
+    std::fs::create_dir_all(output_dir).expect("failed to create output directory");
 }
 
-/// `metrics.csv` row (long-format, one row per round).
-#[derive(Serialize)]
-struct MetricsRow {
-    round: usize,
-    lc: f64,
-    gp: f64,
-    gp_per_agent: f64,
-    n_stable_regions: usize,
-    max_region_size: usize,
-    n_distinct_cultures: usize,
-}
-
-/// Save the per-round metrics history as long-format CSV.
-///
-/// The write mechanism is delegated to `socsim_results::write_csv` (each row is
-/// `serialize`d with a header on the first row — the standard csv-crate behaviour,
-/// byte-equivalent to the former hand-rolled writer). The row struct
-/// [`MetricsRow`] (including the `gp` / `gp_per_agent` columns) stays repo-local.
-pub fn save_metrics(result: &SimulationResult, output_dir: &str) {
-    let rows: Vec<MetricsRow> = result
-        .round_history
-        .iter()
-        .map(|r| MetricsRow {
-            round: r.round,
-            lc: r.lc,
-            gp: r.gp,
-            gp_per_agent: r.gp_per_agent,
-            n_stable_regions: r.n_stable_regions,
-            max_region_size: r.max_region_size,
-            n_distinct_cultures: r.n_distinct_cultures,
-        })
-        .collect();
-    let path = format!("{output_dir}/metrics.csv");
-    socsim_results::write_csv(&rows, &path).expect("failed to write metrics.csv");
+/// Write a serializable value as pretty-printed JSON.
+pub fn write_json<T: serde::Serialize + ?Sized>(value: &T, path: &Path) {
+    let file =
+        File::create(path).unwrap_or_else(|e| panic!("failed to create {}: {e}", path.display()));
+    let mut writer = BufWriter::new(file);
+    serde_json::to_writer_pretty(&mut writer, value)
+        .unwrap_or_else(|e| panic!("failed to write {}: {e}", path.display()));
+    use std::io::Write;
+    writer
+        .flush()
+        .unwrap_or_else(|e| panic!("failed to flush {}: {e}", path.display()));
 }
 
 /// Save the culture grid as CSV (one row per site: row, col, culture vector
 /// joined by `-`). Mirrors the `axelrod1997` grid output for the culture-map viz.
+///
+/// This is a **spatial snapshot**: one row per site, keyed by `(row, col)` with no
+/// time axis, and `culture` is a label (`"0-1-2"`), not a number. It is therefore
+/// a table rather than a metric, and lives under the run's `artifacts/`.
 pub fn save_culture_grid(world: &CultureWorld, output_dir: &str, name: &str) {
     let path = format!("{output_dir}/{name}");
     let file = File::create(&path).expect("failed to create culture grid CSV");
@@ -348,62 +342,20 @@ pub fn save_culture_grid(world: &CultureWorld, output_dir: &str, name: &str) {
     wtr.flush().expect("flush failed");
 }
 
-/// `run_metadata.json` (LLM model / endpoint / temperature / seed / cache stats).
-#[derive(Serialize)]
-pub struct RunMetadataJson {
-    pub provider: String,
-    pub llm_model: String,
-    pub llm_endpoint: String,
-    pub llm_temperature: f32,
-    pub llm_seed: u64,
-    pub total_calls: usize,
-    pub cache_hits: usize,
-    pub cache_hit_rate: f64,
-    pub converged: bool,
-    pub final_round: usize,
-    pub determinism_note: &'static str,
-}
-
-/// Save `run_metadata.json`.
-pub fn save_run_metadata(result: &SimulationResult, cfg: &Config, output_dir: &str) {
-    let meta = RunMetadataJson {
-        provider: cfg.provider.label().to_string(),
-        llm_model: result.llm_model.clone(),
-        llm_endpoint: result.llm_endpoint.clone(),
-        llm_temperature: cfg.llm.temperature,
-        llm_seed: cfg.llm.seed,
-        total_calls: result.metadata.total(),
-        cache_hits: result.metadata.cache_hits(),
-        cache_hit_rate: result.metadata.cache_hit_rate(),
-        converged: result.converged,
-        final_round: result.final_round,
-        determinism_note: "LLM output is outside socsim bit-reproducibility; the prompt->response \
-                           cache (with temperature=0 and fixed seed) is the reproducibility \
-                           mechanism. The socsim core (culture init, site/neighbour draws, \
-                           scheduling, metrics) is deterministic given the seed. The classical \
-                           provider makes zero LLM calls.",
-    };
-    // pretty-print JSON is delegated to `socsim_results::write_json`
-    // (serde_json::to_writer_pretty + flush internally; byte-equivalent to the
-    // former writer). The value sources (model / endpoint / temperature / seed
-    // from result / cfg) and the `RunMetadataJson` shape are kept as-is —
-    // `MetadataCollector::summary()` is deliberately NOT used because it can
-    // change bytes on cache-hit / zero-call runs (classical makes 0 LLM calls).
-    let path = format!("{output_dir}/run_metadata.json");
-    socsim_results::write_json(&meta, &path).expect("failed to write run_metadata.json");
-}
-
 /// Save the intermediate culture-grid snapshots as
 /// `snapshots/culture_grid_round_<NNNNNN>.csv` (zero-padded round), plus a
 /// `snapshots/index.json` listing the rounds. No-op when there are no snapshots
 /// (`snapshot_interval == 0`). The Python `animate` tool renders these into a
 /// culture-map montage / GIF.
+///
+/// `output_dir` is the run's `artifacts/`, so the snapshots sit under
+/// `artifacts/snapshots/` and are hashed into `manifest.csv` by `finish()`.
 pub fn save_snapshots(result: &SimulationResult, output_dir: &str) -> Vec<usize> {
     if result.snapshots.is_empty() {
         return Vec::new();
     }
     let snap_dir = format!("{output_dir}/snapshots");
-    socsim_results::ensure_dir(&snap_dir).expect("failed to create snapshots directory");
+    ensure_output_dir(&snap_dir);
     let mut rounds = Vec::with_capacity(result.snapshots.len());
     for snap in &result.snapshots {
         let name = format!("culture_grid_round_{:06}.csv", snap.round);
@@ -415,10 +367,21 @@ pub fn save_snapshots(result: &SimulationResult, output_dir: &str) -> Vec<usize>
         "n_snapshots": rounds.len(),
         "pattern": "culture_grid_round_{round:06}.csv",
     });
-    let index_path = format!("{snap_dir}/index.json");
-    socsim_results::write_json(&index, &index_path).expect("failed to write snapshots/index.json");
+    write_json(&index, Path::new(&format!("{snap_dir}/index.json")));
     rounds
 }
+
+/// How the LLM layer is pinned down, for the docs and the CLI banner.
+///
+/// Not a number and not a condition, so it is neither a metric nor a parameter;
+/// the numbers it talks about live in the run-scope `llm_calls` /
+/// `llm_cache_hits` / `llm_cache_hit_rate` metrics and in `run.json`'s `llm`
+/// block.
+pub const DETERMINISM_NOTE: &str =
+    "LLM output is outside socsim bit-reproducibility; the prompt->response cache (with \
+     temperature=0 and fixed seed) is the reproducibility mechanism. The socsim core (culture \
+     init, site/neighbour draws, scheduling, metrics) is deterministic given the seed. The \
+     classical provider makes zero LLM calls.";
 
 #[cfg(test)]
 mod tests {

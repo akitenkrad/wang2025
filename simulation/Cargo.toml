@@ -35,6 +35,9 @@ socsim-grid   = { git = "https://github.com/akitenkrad/rs-social-simulation-tool
 # LLMInteractionMechanism unchanged.
 socsim-mechanisms = { git = "https://github.com/akitenkrad/rs-social-simulation-tools", branch = "main", package = "socsim-mechanisms" }
 socsim-llm    = { git = "https://github.com/akitenkrad/rs-social-simulation-tools", branch = "main", package = "socsim-llm", features = ["live"] }
-# Output helpers (timestamp / run-dir / latest symlink / CSV・JSON writer).
-# Shared crate that consolidates library-mode boilerplate.
-socsim-results = { git = "https://github.com/akitenkrad/rs-social-simulation-tools", branch = "main", package = "socsim-results" }
+
+# runvault — 実験記録基盤．run ディレクトリ・config.json・metrics.csv・events.jsonl・
+# manifest を持つ．出力の置き場と同一性はこちらに預けるので，socsim-results
+# (timestamp / latest symlink / CSV・JSON 書き出し) はもう使わない．
+# git 依存．具体的な commit は Cargo.lock で固定される．
+runvault = { git = "https://github.com/akitenkrad/rs-runvault", branch = "main" }

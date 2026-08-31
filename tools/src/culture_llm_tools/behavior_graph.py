@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """behavior_graph.py — render the behaviour-graph / ODD concept export.
 
-Reads `behavior_graph.json` (written by `culture-llm run`; a structured ODD
-outline + a node/edge behaviour graph derived from the fixed model) and renders:
+Reads `artifacts/behavior_graph.json` (written by `culture-llm run`; a structured
+ODD outline + a node/edge behaviour graph derived from the fixed model) and
+renders:
 
   - behavior_graph.png : a node-coloured-by-kind diagram of the behaviour graph
                          (agent / state / event / metric), with labelled edges.
@@ -14,7 +15,7 @@ description of the fixed Axelrod scenario, NOT an LLM-synthesised construction
 
 Usage:
     uv run culture-llm-tools behavior-graph
-    uv run culture-llm-tools behavior-graph --results-dir results/latest
+    uv run culture-llm-tools behavior-graph --results-dir "$(runvault path --experiment culture-llm --latest --subcommand run --standalone)"
 """
 
 from __future__ import annotations
@@ -24,6 +25,9 @@ import json
 import os
 
 import matplotlib.pyplot as plt
+from runvault.read import artifacts_dir, figures_dir, runvault_path
+
+EXPERIMENT = "culture-llm"
 
 COLOR_BG = "#FAFAF8"
 KIND_COLOR = {
@@ -36,8 +40,8 @@ KIND_COLOR = {
 KIND_COL = {"agent": 0, "state": 1, "event": 2, "metric": 3}
 
 
-def load_graph(results_dir: str) -> dict | None:
-    path = os.path.join(results_dir, "behavior_graph.json")
+def load_graph(run_dir: str) -> dict | None:
+    path = os.path.join(artifacts_dir(run_dir), "behavior_graph.json")
     if not os.path.exists(path):
         return None
     with open(path, encoding="utf-8") as f:
@@ -108,18 +112,25 @@ def render(graph: dict, output_dir: str) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="culture-llm-tools behavior-graph", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--results-dir", "--results_dir", default="results/latest")
-    parser.add_argument("--output-dir", "--output_dir", default=None)
+    parser.add_argument("--results-dir", "--results_dir", default=None,
+                        help="runvault の run ディレクトリ (未指定時は最新の run)")
+    parser.add_argument("--results-root", "--results_root", default="results")
+    parser.add_argument("--output-dir", "--output_dir", default=None,
+                        help="図の保存先 (default: results/culture-llm/figures/{run_slug})")
     parser.add_argument("--print-odd", action="store_true", help="also print the ODD protocol")
     args = parser.parse_args(argv)
 
-    results_dir = args.results_dir
-    output_dir = args.output_dir or results_dir
+    run_dir = args.results_dir
+    if run_dir is None:
+        run_dir = runvault_path(
+            EXPERIMENT, args.results_root, subcommand="run", standalone=True
+        )
+    output_dir = args.output_dir or figures_dir(run_dir)
     os.makedirs(output_dir, exist_ok=True)
 
-    graph = load_graph(results_dir)
+    graph = load_graph(run_dir)
     if graph is None:
-        print(f"[behavior-graph] no behavior_graph.json in {results_dir}")
+        print(f"[behavior-graph] no behavior_graph.json in {artifacts_dir(run_dir)}")
         return 1
 
     if args.print_odd:

@@ -4,23 +4,27 @@
 
 Python パッケージ `culture-llm-tools` (モジュール `culture_llm_tools`) は Rust シミュレーションの出力を読み，matplotlib / pandas / numpy / Pillow で図を生成する．ワークスペースルートで `uv sync` でインストールする．
 
+どの run を読むかは runvault に聞く: `--results-dir` (あるいは `--sweep-dir` / `--compare-dir`) で指定するか，省略すると `runvault path --experiment culture-llm --latest --subcommand …` が答える．`results/` を走査して新しそうなディレクトリを当てにいくことはしない．`runvault` バイナリは PATH か環境変数 `RUNVAULT` で解決する．
+
+図は run の **隣** (`<results-root>/culture-llm/figures/<run_slug>/`) に置く．`manifest.csv` は run の完了時に確定するので，後から run の中に足したものはハッシュを持たないためである．runvault 以前の `results/<timestamp>/` も明示的に渡せば読める．
+
 ## `visualize`
 
-単一実行の可視化 (`run` 結果ディレクトリを読む，既定 `results/latest`)．
+単一実行の可視化 (`run` の run ディレクトリを読む．既定は最新の単独 `run`)．
 
 ```bash
 uv run culture-llm-tools visualize
-uv run culture-llm-tools visualize --results-dir results/latest --output-dir out
+uv run culture-llm-tools visualize --results-dir "$(runvault path --experiment culture-llm --latest --subcommand run --standalone)" --output-dir out
 ```
 
 出力:
 
-- `culture_map.png` — 最終文化グリッド (`culture_grid_final.csv`) を相異なる文化プロファイルで色分け．
+- `culture_map.png` — 最終文化グリッド (`artifacts/culture_grid_final.csv`) を相異なる文化プロファイルで色分け．
 - `lc_gp_timeseries.png` — ラウンドごとの LC・GP (および補助 GP/N)．付録 F の LC 目標線 (0.50) と GP 帯 (0.35–0.40) を併記．
 
 ## `visualize-sweep`
 
-スイープの可視化 (`sweep_summary.csv` を読む)．
+スイープの可視化．1 行 1 試行の表は掃引親の子 run (`subcommand=sweep-point`) から組み直す — 試行平均のヒートマップには個々の試行が要り，それは集約指標ではなく各子の `events.jsonl` にあるためである．runvault 以前の `sweep_summary.csv` はそのまま読む．
 
 ```bash
 uv run culture-llm-tools visualize-sweep
@@ -33,20 +37,21 @@ uv run culture-llm-tools visualize-sweep
 
 ## `show-experiment-settings`
 
-`config.json` / `sweep_config.json` / `run_metadata.json` を整形表示する．
+run の実験条件 (`config.json` の `parameters`) と LLM の来歴 — `run.json` の `llm` ブロックと `llm_calls` / `llm_cache_hits` / `llm_cache_hit_rate` 指標 — を整形表示する．LLM を叩かなかった run はどちらも持たないので，0 を並べずにその旨を出す．どのサブコマンドかは `run.json` が答える．legacy の flat な `config.json` / `sweep_config.json` / `run_metadata.json` も読める．
 
 ```bash
-uv run culture-llm-tools show-experiment-settings --results-dir results/latest
+uv run culture-llm-tools show-experiment-settings
+uv run culture-llm-tools show-experiment-settings --results-dir "$(runvault path --experiment culture-llm --latest --subcommand sweep)"
 ```
 
 ## `reproduce`
 
-付録 F / Table 7-2 一括再現ドライバ．Rust の `culture-llm reproduce` サブコマンド (古典・オフライン) を呼び出し，観測 vs 論文の表を表示し，`reproduce_summary.json` + `reproduce_detail.csv` から図を描画する．
+付録 F / Table 7-2 一括再現ドライバ．Rust の `culture-llm reproduce` サブコマンド (古典・オフライン) を呼び出し，記録されたものを読む: 観測平均は各条件の子の `metrics.csv`，論文の報告値は同じ子の `reference.csv`，許容幅と PASS/off の判定は親の `artifacts/reproduce_verdicts.csv` から採る．閾値の宣言は Rust 側の 1 箇所だけで，こちらは読むだけなので食い違う余地が無い．
 
 ```bash
 uv run culture-llm-tools reproduce                                 # フル (cargo + 図)
 uv run culture-llm-tools reproduce --quick                          # 高速スモーク
-uv run culture-llm-tools reproduce --results-dir results/reproduce_<ts>  # 図のみ
+uv run culture-llm-tools reproduce --results-dir "$(runvault path --experiment culture-llm --latest --subcommand reproduce)"  # 図のみ
 ```
 
 出力 (`reproduce_<ts>/figures/` 配下):
@@ -56,10 +61,10 @@ uv run culture-llm-tools reproduce --results-dir results/reproduce_<ts>  # 図�
 
 ## `animate`
 
-`--snapshot-interval` のグリッド (`snapshots/`) から中間文化マップのアニメーション / モンタージュを描画する．
+`--snapshot-interval` のグリッド (`artifacts/snapshots/`) から中間文化マップのアニメーション / モンタージュを描画する．
 
 ```bash
-uv run culture-llm-tools animate --results-dir results/latest --fps 4
+uv run culture-llm-tools animate --fps 4
 ```
 
 出力:
@@ -69,10 +74,10 @@ uv run culture-llm-tools animate --results-dir results/latest --fps 4
 
 ## `behavior-graph`
 
-行動グラフ / ODD 概念エクスポート (`run` が書く `behavior_graph.json`) を描画する．YuLan-OneSim の ODD / 行動グラフ自動構築の **概念デモ**の可視化側であり，固定された Axelrod シナリオをモデル設定から導出した構造的記述である — LLM 合成物**ではない**．
+行動グラフ / ODD 概念エクスポート (`run` が書く `artifacts/behavior_graph.json`) を描画する．YuLan-OneSim の ODD / 行動グラフ自動構築の **概念デモ**の可視化側であり，固定された Axelrod シナリオをモデル設定から導出した構造的記述である — LLM 合成物**ではない**．
 
 ```bash
-uv run culture-llm-tools behavior-graph --results-dir results/latest --print-odd
+uv run culture-llm-tools behavior-graph --print-odd
 ```
 
 出力:
@@ -81,10 +86,11 @@ uv run culture-llm-tools behavior-graph --results-dir results/latest --print-odd
 
 ## `compare-report`
 
-`compare_report.json` (`culture-llm compare` が書く) から古典 vs LLM の比較図を描画する．
+`compare` の親 run から古典 vs LLM の比較図を描画する．各側の最終指標は子 run (`subcommand=compare-side`) から，差は親の `scope=sweep` 指標から採る．runvault 以前の `compare_report.json` はそのまま読む．
 
 ```bash
-uv run culture-llm-tools compare-report --results-dir results/latest
+uv run culture-llm-tools compare-report
+uv run culture-llm-tools compare-report --compare-dir "$(runvault path --experiment culture-llm --latest --subcommand compare)"
 ```
 
 出力:

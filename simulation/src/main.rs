@@ -4,32 +4,41 @@
 //!               (`--provider ollama|openai`) interaction on the same world.
 //!               Writes intermediate culture-grid snapshots (`--snapshot-interval`)
 //!               and a behaviour-graph / ODD concept export (`behavior_graph.json`).
-//! `sweep`     : sweep features `F` × traits `q` (classical or LLM), aggregating
-//!               `n_stable_regions` and LC/GP into `sweep_summary.csv`.
+//! `sweep`     : sweep features `F` × traits `q` (classical or LLM). A sweep
+//!               parent plus one child run per `(F, q)` cell.
 //! `reproduce` : Appendix F / Table 7-2 LC/GP batch reproduction (offline with
-//!               `--provider none`); writes `reproduce_summary.json` (observed vs
-//!               paper + PASS/off) + `reproduce_detail.csv`.
+//!               `--provider none`). A parent plus one child run per condition,
+//!               with Axelrod's published targets in each child's `reference.csv`.
 //! `compare`   : classical (`--provider none`) vs LLM quantitative comparison on
-//!               matched configs (`--mock` for offline LLM); writes
-//!               `compare_report.json` (LC/GP/regions/convergence deltas).
+//!               matched configs (`--mock` for offline LLM). A parent plus one
+//!               child run per side.
+//!
+//! Where the results go is runvault's business. There is no timestamped
+//! directory and no `latest` symlink of our own: `Run::start` names and creates
+//! the run directory, per-round numbers go to its `metrics.csv`, each trial's
+//! final state to its `events.jsonl`, and the tables that are neither (the
+//! culture grid, the snapshots, the ODD export) under its `artifacts/`.
 
+use std::cell::RefCell;
 use std::fs;
 use std::path::Path;
+use std::rc::Rc;
 
 use clap::{Parser, Subcommand};
+use runvault::{Lineage, Run, RunOptions};
+use serde::Serialize;
 
 use culture_llm::config::{parse_provider, Config, LlmSettings, Provider};
-use culture_llm::llm::wrap_client;
+use culture_llm::llm::{build_live_client, wrap_client, CultureClient};
+use culture_llm::mechanisms::SharedClient;
 use culture_llm::odd::{build_behavior_graph, save_behavior_graph};
+use culture_llm::record::{self, TrialOutcome, DOMAIN, EXPERIMENT, REPO_ID};
 use culture_llm::simulation::{
-    ensure_output_dir, run, run_with_client, save_culture_grid, save_metrics, save_run_metadata,
-    save_snapshots, SimulationResult,
+    ensure_output_dir, run_with_shared_client, save_culture_grid, save_snapshots, SimulationResult,
 };
 
-use socsim_core::derive_seed;
 use socsim_llm::mock::ScriptedClient;
 use socsim_llm::PromptCache;
-use socsim_results::{refresh_latest_symlink, timestamp, write_csv, write_json};
 
 // --------------------------------------------------------------------------- //
 // CLI
@@ -52,7 +61,7 @@ struct Cli {
 enum Commands {
     /// Run a single configuration (classical or LLM interaction).
     Run(RunArgs),
-    /// Sweep features F × traits q and aggregate stable-region / LC / GP metrics.
+    /// Sweep features F × traits q; a sweep parent plus one child per cell.
     Sweep(SweepArgs),
     /// Appendix F LC/GP batch reproduction (classical, offline-verifiable).
     Reproduce(ReproduceArgs),
@@ -89,7 +98,7 @@ struct RunArgs {
     /// Snapshot interval in rounds for intermediate culture grids (0 = final only).
     #[arg(long, default_value_t = 0)]
     snapshot_interval: usize,
-    /// Random seed (governs the socsim core layer only).
+    /// Random seed (governs the socsim core layer only; omitted = drawn once and recorded).
     #[arg(long)]
     seed: Option<u64>,
     /// LLM generation temperature (default 0.0).
@@ -101,7 +110,7 @@ struct RunArgs {
     /// Prompt → response cache path (LLM path; default .llm_cache/cache.json).
     #[arg(long, default_value = ".llm_cache/cache.json")]
     cache_path: String,
-    /// Output base directory.
+    /// Results root (runvault writes `<root>/culture-llm/<run_slug>/`).
     #[arg(long, default_value = "results")]
     output_dir: String,
 }
@@ -144,7 +153,7 @@ struct SweepArgs {
     /// Micro-events per engine tick (0 = n_sites).
     #[arg(long, default_value_t = 0)]
     events_per_step: usize,
-    /// Snapshot interval in rounds (passthrough; recorded in config).
+    /// Snapshot interval in rounds (passthrough; recorded in the conditions).
     #[arg(long, default_value_t = 10)]
     snapshot_interval: usize,
     /// Random seed base.
@@ -159,7 +168,7 @@ struct SweepArgs {
     /// Prompt → response cache path (LLM path; shared across the sweep).
     #[arg(long, default_value = ".llm_cache/cache.json")]
     cache_path: String,
-    /// Output base directory.
+    /// Results root (runvault writes `<root>/culture-llm/<run_slug>/`).
     #[arg(long, default_value = "results")]
     output_dir: String,
 }
@@ -181,7 +190,7 @@ struct ReproduceArgs {
     /// Quick mode: fewer runs / shorter rounds for a fast end-to-end smoke.
     #[arg(long, default_value_t = false)]
     quick: bool,
-    /// Output base directory.
+    /// Results root (runvault writes `<root>/culture-llm/<run_slug>/`).
     #[arg(long, default_value = "results")]
     output_dir: String,
 }
@@ -222,32 +231,154 @@ struct CompareArgs {
     /// Prompt → response cache path (LLM path).
     #[arg(long, default_value = ".llm_cache/cache.json")]
     cache_path: String,
-    /// Output base directory.
+    /// Results root (runvault writes `<root>/culture-llm/<run_slug>/`).
     #[arg(long, default_value = "results")]
     output_dir: String,
 }
 
 // --------------------------------------------------------------------------- //
-// CSV rows
+// 実験条件 (runvault の `config.json` の `parameters`)
 // --------------------------------------------------------------------------- //
 
-#[derive(serde::Serialize)]
-struct SweepRow {
-    provider: String,
-    features: usize,
-    traits: usize,
-    run: usize,
+/// `run` 1 本の条件．
+///
+/// 旧 `config.json` に対して 2 つ足してある:
+///
+/// - `runs` — `--runs N` は N 本回して **最後の 1 本**の詳細を残す．どの試行が
+///   記録されるかを決めるので条件の一部だが，旧 `config.json` には無く，
+///   `config_hash` がその違いに盲目だった．
+/// - `llm_cache_path` — LLM 経路の再生元．結果を決めるのは «そこに何が入っているか»
+///   であって path 自体ではないので «置き場» であり，`hash_exclude` で
+///   `config_hash` から外す．古典経路は触らないので `null`．
+///
+/// `output_dir` は落とした — run ディレクトリが出力先そのものである．
+#[derive(Serialize)]
+struct RunParameters {
+    provider: &'static str,
     width: usize,
     height: usize,
+    features: usize,
+    traits: usize,
+    events_per_step: usize,
+    rounds: usize,
+    snapshot_interval: usize,
+    runs: usize,
     seed: u64,
-    converged: bool,
-    final_round: usize,
-    n_stable_regions: usize,
-    max_region_size: usize,
-    n_distinct_cultures: usize,
-    lc: f64,
-    gp: f64,
-    gp_per_agent: f64,
+    llm_temperature: f32,
+    llm_seed: u64,
+    llm_cache_path: Option<String>,
+}
+
+/// 掃引親 run の条件 (F × q のグリッド定義そのもの)．
+///
+/// シードは `base_seed` と名乗る．終端イベントの自由欄 `seed` は試行ごとに違う
+/// 派生シードで，`sweep_events_table` がパラメータ列でイベント列を上書きする以上，
+/// 同名にすると条件側の値が試行側を黙って潰しうる．
+#[derive(Serialize)]
+struct SweepParameters {
+    provider: &'static str,
+    width: usize,
+    height: usize,
+    features_min: usize,
+    features_max: usize,
+    features_step: usize,
+    traits_min: usize,
+    traits_max: usize,
+    traits_step: usize,
+    runs: usize,
+    rounds: usize,
+    events_per_step: usize,
+    snapshot_interval: usize,
+    base_seed: u64,
+    llm_temperature: f32,
+    llm_seed: u64,
+    llm_cache_path: Option<String>,
+}
+
+/// 掃引の子 run (`(F, q)` 1 セル × `runs` 試行) の条件．
+///
+/// `run` の条件に `runs` が付いた形だが，サブコマンド名は `run` ではなく
+/// `sweep-point` にしてある．`run` は 1 本のシミュレーション，子は同一セルの
+/// `runs` 本で，中身の違う 2 つを同じ名前に同居させると
+/// `runvault path --subcommand run` がどちらを返すか分からなくなる．
+#[derive(Serialize)]
+struct SweepPointParameters {
+    provider: &'static str,
+    width: usize,
+    height: usize,
+    features: usize,
+    traits: usize,
+    runs: usize,
+    rounds: usize,
+    events_per_step: usize,
+    snapshot_interval: usize,
+    base_seed: u64,
+    llm_temperature: f32,
+    llm_seed: u64,
+    llm_cache_path: Option<String>,
+}
+
+/// 再現の親 run の条件 (4 条件のバッチ定義)．
+#[derive(Serialize)]
+struct ReproduceParameters {
+    provider: &'static str,
+    conditions: Vec<&'static str>,
+    runs: usize,
+    rounds: usize,
+    quick: bool,
+    base_seed: u64,
+}
+
+/// 再現の子 run (条件 1 つ × `runs` 試行) の条件．
+#[derive(Serialize)]
+struct ReproduceConditionParameters {
+    condition_id: &'static str,
+    provider: &'static str,
+    width: usize,
+    height: usize,
+    features: usize,
+    traits: usize,
+    runs: usize,
+    rounds: usize,
+    events_per_step: usize,
+    snapshot_interval: usize,
+    base_seed: u64,
+}
+
+/// 比較の親 run の条件 (両側に共通の一致 config)．
+#[derive(Serialize)]
+struct CompareParameters {
+    sides: Vec<&'static str>,
+    llm_provider: &'static str,
+    mock: bool,
+    width: usize,
+    height: usize,
+    features: usize,
+    traits: usize,
+    rounds: usize,
+    seed: u64,
+    llm_temperature: f32,
+    llm_seed: u64,
+    llm_cache_path: Option<String>,
+}
+
+/// 比較の子 run (片側 1 本) の条件．
+#[derive(Serialize)]
+struct CompareSideParameters {
+    side: &'static str,
+    provider: &'static str,
+    mock: bool,
+    width: usize,
+    height: usize,
+    features: usize,
+    traits: usize,
+    events_per_step: usize,
+    rounds: usize,
+    snapshot_interval: usize,
+    seed: u64,
+    llm_temperature: f32,
+    llm_seed: u64,
+    llm_cache_path: Option<String>,
 }
 
 // --------------------------------------------------------------------------- //
@@ -273,21 +404,97 @@ fn make_llm_settings(temperature: f32, llm_seed: u64, cache_path: &str) -> LlmSe
     }
 }
 
+/// LLM クライアントを共有ハンドルにする．
+///
+/// **`Run::start` より前に組む** — モデル名と endpoint を知っているのは
+/// クライアントを組んだ側だけで，それが `run.json` の `llm` ブロックの中身だから
+/// である．掃引のように何本も回す場合も 1 度だけ組んで同じハンドルを渡す
+/// (プロンプトキャッシュは移行前も file 経由で試行をまたいで温まっていた)．
+fn share(client: CultureClient) -> SharedClient {
+    Rc::new(RefCell::new(client))
+}
+
+/// 共有ハンドルが名乗るモデル名と endpoint．
+fn client_identity(client: &SharedClient) -> (String, String) {
+    let borrowed = client.borrow();
+    (
+        borrowed.inner().model().to_string(),
+        borrowed.inner().endpoint().to_string(),
+    )
+}
+
+/// 本番の LLM クライアント (Ollama 第一候補 → OpenAI フォールバック + キャッシュ)．
+fn build_client(settings: &LlmSettings) -> SharedClient {
+    share(build_live_client(settings).unwrap_or_else(|e| panic!("LLM client build failed: {e}")))
+}
+
+/// A deterministic scripted mock LLM client that adopts the FIRST differing
+/// feature offered in the prompt's candidate list (mirrors the homophily
+/// decision). Lets `compare --mock` run the LLM side fully offline.
+fn build_mock_client() -> CultureClient {
+    let backend = ScriptedClient::new("mock-culture-llm", |prompt: &str| {
+        if let Some(pos) = prompt.find("differ on these feature indices: [") {
+            let tail = &prompt[pos..];
+            if let Some(open) = tail.find('[') {
+                let first: String = tail[open + 1..]
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect();
+                if !first.is_empty() {
+                    return first;
+                }
+            }
+        }
+        "-1".to_string()
+    });
+    wrap_client(backend, PromptCache::in_memory())
+}
+
+/// LLM 経路のときだけキャッシュの置き場を作る．
+fn prepare_cache_dir(provider: Provider, cache_path: &str) {
+    if provider.is_llm() {
+        if let Some(parent) = Path::new(cache_path).parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+    }
+}
+
+/// LLM 経路のときだけ cache path を条件に載せる (古典経路は触らないので `null`)．
+fn cache_path_of(provider: Provider, cache_path: &str) -> Option<String> {
+    provider.is_llm().then(|| cache_path.to_string())
+}
+
+/// `hash_exclude` に渡す «置き場» のポインタ．
+const CACHE_POINTER: [&str; 1] = ["/llm_cache_path"];
+
+/// 掃引・再現の子で試行をまたいだ LLM 呼び出しを数える．
+#[derive(Default)]
+struct LlmTally {
+    calls: usize,
+    hits: usize,
+}
+
+impl LlmTally {
+    fn add(&mut self, result: &SimulationResult) {
+        self.calls += result.metadata.total();
+        self.hits += result.metadata.cache_hits();
+    }
+}
+
 // --------------------------------------------------------------------------- //
 // run
 // --------------------------------------------------------------------------- //
 
 fn cmd_run(args: RunArgs) {
     let provider = parse_provider(&args.provider).unwrap_or_else(|e| panic!("{e}"));
-    let timestamp = timestamp();
-    let output_dir = format!("{}/{}", args.output_dir, timestamp);
-    ensure_output_dir(&output_dir);
-    if provider.is_llm() {
-        if let Some(parent) = Path::new(&args.cache_path).parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-    }
+    prepare_cache_dir(provider, &args.cache_path);
 
+    // シードを実体化してから記録する．--seed 省略時にシミュレーション側で
+    // rand::random に落とすと，実際に使われたシードがどこにも残らない．
+    let base_seed = args.seed.unwrap_or_else(rand::random::<u64>);
+    let runs = args.runs.max(1);
+
+    let llm = make_llm_settings(args.temperature, args.llm_seed, &args.cache_path);
     let base_cfg = Config {
         width: args.width,
         height: args.height,
@@ -297,10 +504,53 @@ fn cmd_run(args: RunArgs) {
         rounds: args.rounds,
         snapshot_interval: args.snapshot_interval,
         provider,
-        seed: args.seed,
-        llm: make_llm_settings(args.temperature, args.llm_seed, &args.cache_path),
-        output_dir: output_dir.clone(),
+        seed: None, // 試行ごとに派生させる
+        llm,
     };
+
+    // クライアントは Run::start の前に組む (llm ブロックのため)．
+    let client = provider.is_llm().then(|| build_client(&base_cfg.llm));
+
+    let parameters = RunParameters {
+        provider: provider.label(),
+        width: base_cfg.width,
+        height: base_cfg.height,
+        features: base_cfg.features,
+        traits: base_cfg.traits,
+        events_per_step: base_cfg.effective_events_per_step(),
+        rounds: base_cfg.rounds,
+        snapshot_interval: base_cfg.snapshot_interval,
+        runs,
+        seed: base_seed,
+        llm_temperature: args.temperature,
+        llm_seed: args.llm_seed,
+        llm_cache_path: cache_path_of(provider, &args.cache_path),
+    };
+
+    // `--runs N` は掃引ではないので子には割らない．同じ条件を N 本回して最後の
+    // 試行の詳細だけを残す既存の動きなので，master_seed には実際に世界を支配した
+    // シードを書き，replicate_index を N-1 にする．根のシードは /parameters.seed．
+    let recorded_seed = record::trial_seed(base_seed, args.features, args.traits, runs - 1);
+    let mut options = RunOptions::new(EXPERIMENT, "run")
+        .repo_id(REPO_ID)
+        .domain(DOMAIN)
+        .results_root(&args.output_dir)
+        .parameters(&parameters)
+        .expect("runvault: parameters の組み立てに失敗")
+        .hash_exclude(CACHE_POINTER)
+        .seed_pointers(["/seed"])
+        .master_seed(recorded_seed)
+        .replicate_index((runs - 1) as u64)
+        .replication(record::replication());
+    if let Some(c) = &client {
+        let (model, endpoint) = client_identity(c);
+        options = options.llm(record::llm_block(&model, &endpoint, args.temperature));
+    }
+    let mut rv = Run::start(options).expect("runvault: run の開始に失敗");
+
+    // run ディレクトリが出力先そのもの．表と盤面は artifacts/ の下へ．
+    let artifacts = rv.dir().join("artifacts").to_string_lossy().into_owned();
+    ensure_output_dir(&artifacts);
 
     println!("=== YuLan-OneSim (Wang et al. 2025) — Axelrod culture dissemination ===");
     println!(
@@ -310,42 +560,31 @@ fn cmd_run(args: RunArgs) {
         base_cfg.height,
         base_cfg.features,
         base_cfg.traits,
-        args.runs,
+        runs,
         base_cfg.rounds,
     );
-    println!("seed (base): {:?} | output: {}", base_cfg.seed, output_dir);
+    println!(
+        "seed (base): {} | output: {}",
+        base_seed,
+        rv.dir().display()
+    );
     println!("----------------------------------------------------------------------");
-
-    // config.json (pretty-print JSON; delegated to socsim_results::write_json).
-    {
-        let path = format!("{output_dir}/config.json");
-        write_json(&base_cfg.to_run_config_json(), &path).expect("failed to write config.json");
-    }
 
     let mut sum_regions = 0.0f64;
     let mut sum_lc = 0.0f64;
     let mut sum_gp = 0.0f64;
     let mut n_converged = 0usize;
-    let mut last_result: Option<SimulationResult> = None;
+    let mut last: Option<(u64, SimulationResult)> = None;
 
-    for run_idx in 0..args.runs.max(1) {
+    for run_idx in 0..runs {
         // Derive a per-run seed (deterministic) from the base seed.
-        let seed = match base_cfg.seed {
-            Some(s) => Some(derive_seed(
-                s,
-                &[
-                    base_cfg.features as u64,
-                    base_cfg.traits as u64,
-                    run_idx as u64,
-                ],
-            )),
-            None => None,
-        };
+        let seed = record::trial_seed(base_seed, base_cfg.features, base_cfg.traits, run_idx);
         let cfg = Config {
-            seed,
+            seed: Some(seed),
             ..base_cfg.clone()
         };
-        let result = run(&cfg).unwrap_or_else(|e| panic!("run failed: {e}"));
+        let result = run_with_shared_client(&cfg, client.clone())
+            .unwrap_or_else(|e| panic!("run failed: {e}"));
         if result.converged {
             n_converged += 1;
         }
@@ -354,9 +593,9 @@ fn cmd_run(args: RunArgs) {
         sum_gp += result.final_metrics.global_polarization;
 
         println!(
-            "[{}/{}] seed={:?} converged={} round={} regions={} LC={:.3} GP={:.5} GP/N={:.3}",
+            "[{}/{}] seed={} converged={} round={} regions={} LC={:.3} GP={:.5} GP/N={:.3}",
             run_idx + 1,
-            args.runs.max(1),
+            runs,
             seed,
             result.converged,
             result.final_round,
@@ -365,34 +604,38 @@ fn cmd_run(args: RunArgs) {
             result.final_metrics.global_polarization,
             result.final_metrics.gp_per_agent,
         );
-        last_result = Some(result);
+        last = Some((seed, result));
     }
 
-    // Write per-round metrics + final grid + run_metadata for the last run.
-    let result = last_result.expect("at least one run");
-    save_metrics(&result, &output_dir);
-    save_culture_grid(&result.world, &output_dir, "culture_grid_final.csv");
-    save_run_metadata(&result, &base_cfg, &output_dir);
+    // Record the last run (the one master_seed / replicate_index name).
+    let (seed, result) = last.expect("at least one run");
+    record::log_round_metrics(&mut rv, &result.round_history);
+    record::log_run_scope(&mut rv, &result);
+    record::log_llm_metrics(&mut rv, &result.metadata);
+    // run は全ラウンドを観測して metrics.csv に残しているので，観測時刻も全ラウンド．
+    let observed: Vec<u64> = result
+        .round_history
+        .iter()
+        .map(|r| r.round as u64)
+        .collect();
+    record::log_terminal(&mut rv, "run", seed, base_cfg.rounds, observed, &result);
 
-    // Intermediate culture-grid snapshots (only when --snapshot-interval > 0).
-    let snapshot_rounds = save_snapshots(&result, &output_dir);
+    save_culture_grid(&result.world, &artifacts, "culture_grid_final.csv");
+    let snapshot_rounds = save_snapshots(&result, &artifacts);
 
     // Behaviour-graph / ODD-protocol concept export (derived from the model).
     let graph = build_behavior_graph(&base_cfg);
-    save_behavior_graph(&graph, &output_dir);
+    save_behavior_graph(&graph, &artifacts);
 
-    // latest symlink (best-effort; errors ignored as before).
-    let _ = refresh_latest_symlink(&args.output_dir, &timestamp);
-
-    let runs = args.runs.max(1) as f64;
     println!("----------------------------------------------------------------------");
+    let denom = runs as f64;
     println!(
         "done: {}/{} converged | mean n_stable_regions = {:.2} | mean LC = {:.3} | mean GP = {:.5}",
         n_converged,
-        args.runs.max(1),
-        sum_regions / runs,
-        sum_lc / runs,
-        sum_gp / runs,
+        runs,
+        sum_regions / denom,
+        sum_lc / denom,
+        sum_gp / denom,
     );
     println!(
         "LLM calls: {} | cache-hit: {} ({:.1}%) | model: {}",
@@ -401,14 +644,20 @@ fn cmd_run(args: RunArgs) {
         result.metadata.cache_hit_rate() * 100.0,
         result.llm_model,
     );
-    println!("metrics  → {output_dir}/metrics.csv");
-    println!("grid     → {output_dir}/culture_grid_final.csv");
-    println!("metadata → {output_dir}/run_metadata.json");
-    println!("config   → {output_dir}/config.json");
-    println!("graph    → {output_dir}/behavior_graph.json");
+
+    let dir = rv.finish().expect("runvault: run の完了に失敗");
+    println!("metrics  → {}/metrics.csv", dir.display());
+    println!("terminal → {}/events.jsonl", dir.display());
+    println!(
+        "grid     → {}/artifacts/culture_grid_final.csv",
+        dir.display()
+    );
+    println!("graph    → {}/artifacts/behavior_graph.json", dir.display());
+    println!("config   → {}/config.json", dir.display());
     if !snapshot_rounds.is_empty() {
         println!(
-            "snapshots→ {output_dir}/snapshots/ ({} grids: rounds {:?})",
+            "snapshots→ {}/artifacts/snapshots/ ({} grids: rounds {:?})",
+            dir.display(),
             snapshot_rounds.len(),
             snapshot_rounds,
         );
@@ -421,20 +670,59 @@ fn cmd_run(args: RunArgs) {
 
 fn cmd_sweep(args: SweepArgs) {
     let provider = parse_provider(&args.provider).unwrap_or_else(|e| panic!("{e}"));
-    let timestamp = timestamp();
-    let dir_name = format!("{timestamp}_sweep");
-    let sweep_dir = format!("{}/{}", args.output_dir, dir_name);
-    fs::create_dir_all(&sweep_dir).expect("failed to create sweep dir");
-    if provider.is_llm() {
-        if let Some(parent) = Path::new(&args.cache_path).parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-    }
+    prepare_cache_dir(provider, &args.cache_path);
 
     let feature_vals = enumerate_range(args.features_min, args.features_max, args.features_step);
     let traits_vals = enumerate_range(args.traits_min, args.traits_max, args.traits_step);
     let n_combos = feature_vals.len() * traits_vals.len();
     let n_total = n_combos * args.runs;
+
+    let llm = make_llm_settings(args.temperature, args.llm_seed, &args.cache_path);
+    let client = provider.is_llm().then(|| build_client(&llm));
+    let llm_identity = client.as_ref().map(client_identity);
+
+    let sweep_parameters = SweepParameters {
+        provider: provider.label(),
+        width: args.width,
+        height: args.height,
+        features_min: args.features_min,
+        features_max: args.features_max,
+        features_step: args.features_step,
+        traits_min: args.traits_min,
+        traits_max: args.traits_max,
+        traits_step: args.traits_step,
+        runs: args.runs,
+        rounds: args.rounds,
+        events_per_step: args.events_per_step,
+        snapshot_interval: args.snapshot_interval,
+        base_seed: args.seed,
+        llm_temperature: args.temperature,
+        llm_seed: args.llm_seed,
+        llm_cache_path: cache_path_of(provider, &args.cache_path),
+    };
+
+    // 親 run: F × q のグリッド定義そのものを parameters に持つ．個別セルの指標は
+    // 書かない．親は 1 本のシミュレーションではないので master_seed を名乗らず，
+    // base seed は /parameters.base_seed と seed_pointers 経由で execution_hash に残る．
+    let parent = Run::start(
+        RunOptions::new(EXPERIMENT, "sweep")
+            .repo_id(REPO_ID)
+            .domain(DOMAIN)
+            .results_root(&args.output_dir)
+            .parameters(&sweep_parameters)
+            .expect("runvault: sweep の parameters の組み立てに失敗")
+            .hash_exclude(CACHE_POINTER)
+            .seed_pointers(["/base_seed"])
+            .sweep_parent()
+            .replication(record::replication()),
+    )
+    .expect("runvault: sweep 親 run の開始に失敗");
+
+    let sweep_id = parent
+        .sweep_id()
+        .expect("runvault: sweep 親に sweep_id がありません")
+        .to_string();
+    let parent_run_uid = parent.run_uid().to_string();
 
     println!("=== YuLan-OneSim — culture dissemination parameter sweep ===");
     println!(
@@ -447,42 +735,62 @@ fn cmd_sweep(args: SweepArgs) {
         args.runs,
         n_total,
     );
-    println!("output: {sweep_dir}");
+    println!(
+        "seed (base): {} | output: {}",
+        args.seed,
+        parent.dir().display()
+    );
     println!("------------------------------------------------------------");
-
-    // sweep_config.json
-    {
-        let config_json = serde_json::json!({
-            "command": "sweep",
-            "provider": provider.label(),
-            "width": args.width,
-            "height": args.height,
-            "features": { "min": args.features_min, "max": args.features_max, "step": args.features_step },
-            "traits": { "min": args.traits_min, "max": args.traits_max, "step": args.traits_step },
-            "runs": args.runs,
-            "rounds": args.rounds,
-            "events_per_step": args.events_per_step,
-            "snapshot_interval": args.snapshot_interval,
-            "seed": args.seed,
-            "llm_temperature": args.temperature,
-            "llm_seed": args.llm_seed,
-        });
-        let path = format!("{sweep_dir}/sweep_config.json");
-        write_json(&config_json, &path).expect("failed to write sweep_config.json");
-    }
-
-    let mut summary_rows: Vec<SweepRow> = Vec::with_capacity(n_total);
 
     let mut idx = 0usize;
     for &features in &feature_vals {
         for &traits in &traits_vals {
-            let mut sum_regions = 0.0f64;
-            let mut n_converged = 0usize;
+            let params = SweepPointParameters {
+                provider: provider.label(),
+                width: args.width,
+                height: args.height,
+                features,
+                traits,
+                runs: args.runs,
+                rounds: args.rounds,
+                events_per_step: args.events_per_step,
+                snapshot_interval: args.snapshot_interval,
+                base_seed: args.seed,
+                llm_temperature: args.temperature,
+                llm_seed: args.llm_seed,
+                llm_cache_path: cache_path_of(provider, &args.cache_path),
+            };
 
+            // 子は「その (F, q) の試行群」そのもの．master_seed は親と同じ base で，
+            // セルが違えば config_hash が違うので run としては別物になる．同じ条件の
+            // 繰り返しは無いので replicate_index は 0．
+            let mut child_options = RunOptions::new(EXPERIMENT, "sweep-point")
+                .repo_id(REPO_ID)
+                .domain(DOMAIN)
+                .results_root(&args.output_dir)
+                .parameters(&params)
+                .expect("runvault: 子 run の parameters の組み立てに失敗")
+                .hash_exclude(CACHE_POINTER)
+                .seed_pointers(["/base_seed"])
+                .master_seed(args.seed)
+                .replicate_index(0)
+                .lineage(Lineage {
+                    sweep_id: Some(sweep_id.clone()),
+                    parent_run_uid: Some(parent_run_uid.clone()),
+                    ..Default::default()
+                })
+                .replication(record::replication());
+            if let Some((model, endpoint)) = &llm_identity {
+                child_options =
+                    child_options.llm(record::llm_block(model, endpoint, args.temperature));
+            }
+            let mut child = Run::start(child_options).expect("runvault: 子 run の開始に失敗");
+
+            let mut trials: Vec<TrialOutcome> = Vec::with_capacity(args.runs);
+            let mut tally = LlmTally::default();
             for run_idx in 0..args.runs {
                 idx += 1;
-                let seed =
-                    derive_seed(args.seed, &[features as u64, traits as u64, run_idx as u64]);
+                let seed = record::trial_seed(args.seed, features, traits, run_idx);
                 let cfg = Config {
                     width: args.width,
                     height: args.height,
@@ -493,56 +801,51 @@ fn cmd_sweep(args: SweepArgs) {
                     snapshot_interval: args.snapshot_interval,
                     provider,
                     seed: Some(seed),
-                    llm: make_llm_settings(args.temperature, args.llm_seed, &args.cache_path),
-                    output_dir: sweep_dir.clone(),
+                    llm: llm.clone(),
                 };
-                let result = run(&cfg).unwrap_or_else(|e| panic!("run failed: {e}"));
-                if result.converged {
-                    n_converged += 1;
-                }
-                sum_regions += result.final_metrics.n_stable_regions as f64;
-
-                summary_rows.push(SweepRow {
-                    provider: provider.label().to_string(),
-                    features,
-                    traits,
-                    run: run_idx,
-                    width: args.width,
-                    height: args.height,
+                let result = run_with_shared_client(&cfg, client.clone())
+                    .unwrap_or_else(|e| panic!("run failed: {e}"));
+                // 掃引が見るのは各試行の最終ラウンドだけなので，観測時刻もそこ 1 点．
+                record::log_terminal(
+                    &mut child,
+                    &format!("trial-{run_idx}"),
                     seed,
-                    converged: result.converged,
-                    final_round: result.final_round,
-                    n_stable_regions: result.final_metrics.n_stable_regions,
-                    max_region_size: result.final_metrics.max_region_size,
-                    n_distinct_cultures: result.final_metrics.n_distinct_cultures,
-                    lc: result.final_metrics.local_convergence,
-                    gp: result.final_metrics.global_polarization,
-                    gp_per_agent: result.final_metrics.gp_per_agent,
-                });
+                    args.rounds,
+                    [result.final_round as u64],
+                    &result,
+                );
+                tally.add(&result);
+                trials.push(TrialOutcome::from_result(&result));
             }
-            let mean = sum_regions / args.runs.max(1) as f64;
+            record::log_condition_summary(&mut child, &trials);
+            record::log_llm_totals(&mut child, tally.calls, tally.hits);
+
+            let n_converged = trials.iter().filter(|t| t.converged).count();
+            let mean = trials
+                .iter()
+                .map(|t| t.n_stable_regions as f64)
+                .sum::<f64>()
+                / trials.len() as f64;
             println!(
                 "[{}/{}] F={:<3} q={:<3} → converged={}/{} mean_regions={:.2}",
                 idx, n_total, features, traits, n_converged, args.runs, mean
             );
+
+            child.finish().expect("runvault: 子 run の完了に失敗");
         }
     }
 
-    // sweep_summary.csv (each row serialized; delegated to socsim_results::write_csv).
-    {
-        let path = format!("{sweep_dir}/sweep_summary.csv");
-        write_csv(&summary_rows, &path).expect("failed to write sweep_summary.csv");
-    }
-
-    let _ = refresh_latest_symlink(&args.output_dir, &dir_name);
+    let dir = parent
+        .finish()
+        .expect("runvault: sweep 親 run の完了に失敗");
     println!("------------------------------------------------------------");
-    println!("sweep done.");
-    println!("summary → {sweep_dir}/sweep_summary.csv");
-    println!("config  → {sweep_dir}/sweep_config.json");
+    println!("sweep done: {n_total} runs across {n_combos} cells.");
+    println!("掃引定義 → {}/config.json", dir.display());
+    println!("各セルの試行は子 run (subcommand=sweep-point) の events.jsonl にあります");
 }
 
 // --------------------------------------------------------------------------- //
-// reproduce (Phase 3 stub)
+// reproduce
 // --------------------------------------------------------------------------- //
 
 /// One Appendix-F / Table 7-2 reproduction condition + its published target.
@@ -552,9 +855,12 @@ struct ReproCondition {
     height: usize,
     features: usize,
     traits: usize,
-    /// Axelrod Table 7-2 target: mean number of stable regions.
+    /// Axelrod Table 7-2 target: mean number of stable regions. A number the
+    /// paper printed, so it goes into the child's `reference.csv`.
     target_regions: f64,
     /// Tolerance band (± regions) within which the condition counts as PASS.
+    /// **Ours, not the paper's** — neither a metric nor a reported value, so it
+    /// stays in the parent's `artifacts/` verdict table and on the console.
     tol_regions: f64,
 }
 
@@ -599,23 +905,23 @@ const REPRO_CONDITIONS: [ReproCondition; 4] = [
     },
 ];
 
-#[derive(serde::Serialize)]
-struct ReproConditionResult {
-    id: String,
-    width: usize,
-    height: usize,
+/// One row of the parent's `artifacts/reproduce_verdicts.csv`.
+///
+/// The observed mean is a metric of the child and the target is that child's
+/// `reference.csv` row; what only lives here is the band we chose and the
+/// verdict it produces.
+#[derive(Serialize)]
+struct VerdictRow {
+    id: &'static str,
     features: usize,
     traits: usize,
     runs: usize,
     target_regions: f64,
     observed_mean_regions: f64,
     abs_error: f64,
+    tolerance: f64,
     within_tolerance: bool,
-    mean_lc: f64,
-    mean_gp: f64,
-    mean_gp_per_agent: f64,
-    mean_max_region_size: f64,
-    converged_fraction: f64,
+    child_run_slug: String,
 }
 
 fn cmd_reproduce(args: ReproduceArgs) {
@@ -625,39 +931,114 @@ fn cmd_reproduce(args: ReproduceArgs) {
     } else {
         (args.runs, args.rounds)
     };
-    let timestamp = timestamp();
-    let dir_name = format!("reproduce_{timestamp}");
-    let base_dir = format!("{}/{}", args.output_dir, dir_name);
-    let figures_dir = format!("{base_dir}/figures");
-    fs::create_dir_all(&figures_dir).expect("failed to create reproduce figures dir");
+    let runs = runs.max(1);
+    // 再現バッチは LLM の設定を CLI で受け取らない (付録 F の照合は古典経路)．
+    let cache_path = ".llm_cache/cache.json";
+    let llm = make_llm_settings(0.0, 0, cache_path);
+    prepare_cache_dir(provider, cache_path);
+    let client = provider.is_llm().then(|| build_client(&llm));
+    let llm_identity = client.as_ref().map(client_identity);
+
+    let parent_parameters = ReproduceParameters {
+        provider: provider.label(),
+        conditions: REPRO_CONDITIONS.iter().map(|c| c.id).collect(),
+        runs,
+        rounds,
+        quick: args.quick,
+        base_seed: args.seed,
+    };
+
+    let parent = Run::start(
+        RunOptions::new(EXPERIMENT, "reproduce")
+            .repo_id(REPO_ID)
+            .domain(DOMAIN)
+            .results_root(&args.output_dir)
+            .parameters(&parent_parameters)
+            .expect("runvault: reproduce の parameters の組み立てに失敗")
+            .seed_pointers(["/base_seed"])
+            .sweep_parent()
+            .replication(record::replication()),
+    )
+    .expect("runvault: reproduce 親 run の開始に失敗");
+
+    let sweep_id = parent
+        .sweep_id()
+        .expect("runvault: reproduce 親に sweep_id がありません")
+        .to_string();
+    let parent_run_uid = parent.run_uid().to_string();
+    let parent_artifacts = parent
+        .dir()
+        .join("artifacts")
+        .to_string_lossy()
+        .into_owned();
+    ensure_output_dir(&parent_artifacts);
 
     println!("=== YuLan-OneSim — Appendix F / Axelrod Table 7-2 reproduction ===");
     println!(
-        "provider: {} | runs={} | rounds={} | quick={} | output: {base_dir}",
+        "provider: {} | runs={} | rounds={} | quick={} | output: {}",
         provider.label(),
         runs,
         rounds,
         args.quick,
+        parent.dir().display(),
     );
     println!("----------------------------------------------------------------------");
 
-    let mut cond_results: Vec<ReproConditionResult> = Vec::new();
-    // Per-condition per-run rows feed the Python figures (figures/*.png).
-    let mut detail_rows: Vec<SweepRow> = Vec::new();
+    let mut verdicts: Vec<VerdictRow> = Vec::with_capacity(REPRO_CONDITIONS.len());
 
     for cond in REPRO_CONDITIONS.iter() {
-        let mut sum_regions = 0.0f64;
-        let mut sum_lc = 0.0f64;
-        let mut sum_gp = 0.0f64;
-        let mut sum_gpn = 0.0f64;
-        let mut sum_max = 0.0f64;
-        let mut n_converged = 0usize;
+        let params = ReproduceConditionParameters {
+            condition_id: cond.id,
+            provider: provider.label(),
+            width: cond.width,
+            height: cond.height,
+            features: cond.features,
+            traits: cond.traits,
+            runs,
+            rounds,
+            events_per_step: cond.width * cond.height,
+            snapshot_interval: 0,
+            base_seed: args.seed,
+        };
 
-        for run_idx in 0..runs.max(1) {
-            let seed = derive_seed(
-                args.seed,
-                &[cond.features as u64, cond.traits as u64, run_idx as u64],
-            );
+        let mut child_options = RunOptions::new(EXPERIMENT, "reproduce-condition")
+            .repo_id(REPO_ID)
+            .domain(DOMAIN)
+            .results_root(&args.output_dir)
+            .parameters(&params)
+            .expect("runvault: 条件の parameters の組み立てに失敗")
+            .seed_pointers(["/base_seed"])
+            .master_seed(args.seed)
+            .replicate_index(0)
+            .lineage(Lineage {
+                sweep_id: Some(sweep_id.clone()),
+                parent_run_uid: Some(parent_run_uid.clone()),
+                ..Default::default()
+            })
+            .replication(record::replication());
+        if let Some((model, endpoint)) = &llm_identity {
+            child_options = child_options.llm(record::llm_block(model, endpoint, 0.0));
+        }
+        let mut child = Run::start(child_options).expect("runvault: 条件の子 run の開始に失敗");
+
+        // 論文の報告値は reference.csv の担当．観測値 (mean_n_stable_regions) と
+        // 同じ名前で並ぶので，差は後から名前で突き合わせて取れる．こちらが置いた
+        // 許容幅は入れない — 原著が印字した数ではないからである．
+        child
+            .log_reference("mean_n_stable_regions", cond.target_regions)
+            .scope("run")
+            .target("table7-2")
+            .source(format!(
+                "Axelrod (1997) Table 7-2 (F={}, q={}), via Wang et al. (2025) Appendix F",
+                cond.features, cond.traits
+            ))
+            .send()
+            .expect("論文の報告値の記録に失敗");
+
+        let mut trials: Vec<TrialOutcome> = Vec::with_capacity(runs);
+        let mut tally = LlmTally::default();
+        for run_idx in 0..runs {
+            let seed = record::trial_seed(args.seed, cond.features, cond.traits, run_idx);
             let cfg = Config {
                 width: cond.width,
                 height: cond.height,
@@ -668,43 +1049,35 @@ fn cmd_reproduce(args: ReproduceArgs) {
                 snapshot_interval: 0,
                 provider,
                 seed: Some(seed),
-                llm: make_llm_settings(0.0, 0, ".llm_cache/cache.json"),
-                output_dir: base_dir.clone(),
+                llm: llm.clone(),
             };
-            let result = run(&cfg).unwrap_or_else(|e| panic!("reproduce run failed: {e}"));
-            if result.converged {
-                n_converged += 1;
-            }
-            let m = &result.final_metrics;
-            sum_regions += m.n_stable_regions as f64;
-            sum_lc += m.local_convergence;
-            sum_gp += m.global_polarization;
-            sum_gpn += m.gp_per_agent;
-            sum_max += m.max_region_size as f64;
-
-            detail_rows.push(SweepRow {
-                provider: provider.label().to_string(),
-                features: cond.features,
-                traits: cond.traits,
-                run: run_idx,
-                width: cond.width,
-                height: cond.height,
+            let result = run_with_shared_client(&cfg, client.clone())
+                .unwrap_or_else(|e| panic!("reproduce run failed: {e}"));
+            record::log_terminal(
+                &mut child,
+                &format!("trial-{run_idx}"),
                 seed,
-                converged: result.converged,
-                final_round: result.final_round,
-                n_stable_regions: m.n_stable_regions,
-                max_region_size: m.max_region_size,
-                n_distinct_cultures: m.n_distinct_cultures,
-                lc: m.local_convergence,
-                gp: m.global_polarization,
-                gp_per_agent: m.gp_per_agent,
-            });
+                rounds,
+                [result.final_round as u64],
+                &result,
+            );
+            tally.add(&result);
+            trials.push(TrialOutcome::from_result(&result));
         }
+        record::log_condition_summary(&mut child, &trials);
+        record::log_llm_totals(&mut child, tally.calls, tally.hits);
 
-        let denom = runs.max(1) as f64;
-        let mean_regions = sum_regions / denom;
+        let denom = trials.len() as f64;
+        let mean_regions = trials
+            .iter()
+            .map(|t| t.n_stable_regions as f64)
+            .sum::<f64>()
+            / denom;
+        let mean_lc = trials.iter().map(|t| t.lc).sum::<f64>() / denom;
+        let mean_gpn = trials.iter().map(|t| t.gp_per_agent).sum::<f64>() / denom;
         let abs_error = (mean_regions - cond.target_regions).abs();
         let within = abs_error <= cond.tol_regions;
+
         println!(
             "[{:<6}] F={:<2} q={:<2} → observed {:.2} (target {:.1} ±{:.1})  {}  | LC={:.3} GP/N={:.3}",
             cond.id,
@@ -714,125 +1087,148 @@ fn cmd_reproduce(args: ReproduceArgs) {
             cond.target_regions,
             cond.tol_regions,
             if within { "PASS" } else { "off" },
-            sum_lc / denom,
-            sum_gpn / denom,
+            mean_lc,
+            mean_gpn,
         );
 
-        cond_results.push(ReproConditionResult {
-            id: cond.id.to_string(),
-            width: cond.width,
-            height: cond.height,
+        verdicts.push(VerdictRow {
+            id: cond.id,
             features: cond.features,
             traits: cond.traits,
-            runs: runs.max(1),
+            runs,
             target_regions: cond.target_regions,
             observed_mean_regions: mean_regions,
             abs_error,
+            tolerance: cond.tol_regions,
             within_tolerance: within,
-            mean_lc: sum_lc / denom,
-            mean_gp: sum_gp / denom,
-            mean_gp_per_agent: sum_gpn / denom,
-            mean_max_region_size: sum_max / denom,
-            converged_fraction: n_converged as f64 / denom,
+            child_run_slug: child.run_slug().to_string(),
         });
+
+        child.finish().expect("runvault: 条件の子 run の完了に失敗");
     }
 
-    // reproduce_detail.csv (per-condition per-run; consumed by Python figures).
+    // 許容幅つきの判定表は指標でも報告値でもないので artifacts/ に残す．
     {
-        let path = format!("{base_dir}/reproduce_detail.csv");
-        write_csv(&detail_rows, &path).expect("failed to write reproduce_detail.csv");
+        let path = format!("{parent_artifacts}/reproduce_verdicts.csv");
+        let mut wtr = csv::Writer::from_path(&path).expect("failed to create verdict CSV");
+        for row in &verdicts {
+            wtr.serialize(row).expect("verdict row write failed");
+        }
+        wtr.flush().expect("verdict CSV flush failed");
     }
 
-    let n_pass = cond_results.iter().filter(|c| c.within_tolerance).count();
-    let n_total = cond_results.len();
-    let summary = serde_json::json!({
-        "command": "reproduce",
-        "paper": "Axelrod (1997) Table 7-2 / YuLan-OneSim Appendix F",
-        "provider": provider.label(),
-        "runs": runs,
-        "rounds": rounds,
-        "quick": args.quick,
-        "seed": args.seed,
-        "base_dir": base_dir,
-        "figures_dir": figures_dir,
-        "detail_csv": format!("{base_dir}/reproduce_detail.csv"),
-        "n_pass": n_pass,
-        "n_total": n_total,
-        "conditions": cond_results,
-        "gp_note": "GP=|C|/N² is recorded as documented; gp_per_agent=|C|/N is the \
-                    auxiliary normalisation (see docs/architecture.md GP inconsistency).",
-    });
-    let summary_path = format!("{base_dir}/reproduce_summary.json");
-    write_json(&summary, &summary_path).expect("failed to write reproduce_summary.json");
-
-    let _ = refresh_latest_symlink(&args.output_dir, &dir_name);
+    let n_pass = verdicts.iter().filter(|v| v.within_tolerance).count();
+    let n_total = verdicts.len();
+    let dir = parent
+        .finish()
+        .expect("runvault: reproduce 親 run の完了に失敗");
     println!("----------------------------------------------------------------------");
     println!("reproduce done: {n_pass}/{n_total} conditions within tolerance.");
-    println!("summary → {summary_path}");
-    println!("detail  → {base_dir}/reproduce_detail.csv");
-    println!("figures → {figures_dir}/ (render with: culture-llm-tools reproduce --skip-build)");
+    println!(
+        "判定表 → {}/artifacts/reproduce_verdicts.csv",
+        dir.display()
+    );
+    println!("報告値 → 各条件の子 run (subcommand=reproduce-condition) の reference.csv");
+    println!("観測値 → 同じ子 run の metrics.csv (mean_n_stable_regions ほか)");
 }
 
 // --------------------------------------------------------------------------- //
 // compare (classical vs LLM)
 // --------------------------------------------------------------------------- //
 
-/// A deterministic scripted mock LLM client that adopts the FIRST differing
-/// feature offered in the prompt's candidate list (mirrors the homophily
-/// decision). Lets `compare --mock` run the LLM side fully offline.
-fn build_mock_client() -> culture_llm::llm::CultureClient {
-    let backend = ScriptedClient::new("mock-culture-llm", |prompt: &str| {
-        if let Some(pos) = prompt.find("differ on these feature indices: [") {
-            let tail = &prompt[pos..];
-            if let Some(open) = tail.find('[') {
-                let first: String = tail[open + 1..]
-                    .chars()
-                    .take_while(|c| c.is_ascii_digit())
-                    .collect();
-                if !first.is_empty() {
-                    return first;
-                }
-            }
-        }
-        "-1".to_string()
-    });
-    wrap_client(backend, PromptCache::in_memory())
-}
+/// 比較の片側 1 本を子 run として回す．
+///
+/// 両側とも «同じ盤面・同じシード・同じラウンド数で回した 1 本のシミュレーション»
+/// で，機構だけが違う．したがってこれは 1 回の実行の中の比較ではなく，模型の別々の
+/// 実行が 2 つある — 子 run に割っても起きていない実行を主張することにはならない．
+/// 逆に 1 本の run に押し込むと，`metrics.csv` の主キーが両側で衝突し，`llm`
+/// ブロックが «モデル無し» と «llama3.2» の 2 つを同時に名乗ることになる．
+fn run_compare_side(
+    args: &CompareArgs,
+    side: &'static str,
+    provider: Provider,
+    client: Option<SharedClient>,
+    llm: &LlmSettings,
+    sweep_id: &str,
+    parent_run_uid: &str,
+) -> SimulationResult {
+    let params = CompareSideParameters {
+        side,
+        provider: provider.label(),
+        mock: args.mock,
+        width: args.width,
+        height: args.height,
+        features: args.features,
+        traits: args.traits,
+        events_per_step: args.width * args.height,
+        rounds: args.rounds,
+        snapshot_interval: 0,
+        seed: args.seed,
+        llm_temperature: args.temperature,
+        llm_seed: args.llm_seed,
+        llm_cache_path: cache_path_of(provider, &args.cache_path),
+    };
 
-#[derive(serde::Serialize)]
-struct CompareSide {
-    label: String,
-    provider: String,
-    llm_model: String,
-    converged: bool,
-    final_round: usize,
-    n_stable_regions: usize,
-    max_region_size: usize,
-    n_distinct_cultures: usize,
-    lc: f64,
-    gp: f64,
-    gp_per_agent: f64,
-    total_llm_calls: usize,
-    cache_hit_rate: f64,
-}
-
-fn compare_side(label: &str, result: &SimulationResult, provider_label: &str) -> CompareSide {
-    let m = &result.final_metrics;
-    CompareSide {
-        label: label.to_string(),
-        provider: provider_label.to_string(),
-        llm_model: result.llm_model.clone(),
-        converged: result.converged,
-        final_round: result.final_round,
-        n_stable_regions: m.n_stable_regions,
-        max_region_size: m.max_region_size,
-        n_distinct_cultures: m.n_distinct_cultures,
-        lc: m.local_convergence,
-        gp: m.global_polarization,
-        gp_per_agent: m.gp_per_agent,
-        total_llm_calls: result.metadata.total(),
-        cache_hit_rate: result.metadata.cache_hit_rate(),
+    let mut options = RunOptions::new(EXPERIMENT, "compare-side")
+        .repo_id(REPO_ID)
+        .domain(DOMAIN)
+        .results_root(&args.output_dir)
+        .parameters(&params)
+        .expect("runvault: 比較の子の parameters の組み立てに失敗")
+        .hash_exclude(CACHE_POINTER)
+        .seed_pointers(["/seed"])
+        .master_seed(args.seed)
+        .replicate_index(0)
+        .lineage(Lineage {
+            sweep_id: Some(sweep_id.to_string()),
+            parent_run_uid: Some(parent_run_uid.to_string()),
+            ..Default::default()
+        })
+        .replication(record::replication());
+    if let Some(c) = &client {
+        let (model, endpoint) = client_identity(c);
+        options = options.llm(record::llm_block(&model, &endpoint, args.temperature));
     }
+    let mut rv = Run::start(options).expect("runvault: 比較の子 run の開始に失敗");
+
+    let mut cfg = Config {
+        width: args.width,
+        height: args.height,
+        features: args.features,
+        traits: args.traits,
+        events_per_step: 0,
+        rounds: args.rounds,
+        snapshot_interval: 0,
+        provider,
+        seed: Some(args.seed),
+        llm: llm.clone(),
+    };
+    if args.mock && provider.is_llm() {
+        // The mock client uses an in-memory cache (no file to save to), so clear
+        // the cache_path to skip the (would-fail) save step.
+        cfg.llm.cache_path = None;
+    }
+
+    let result = run_with_shared_client(&cfg, client).unwrap_or_else(|e| {
+        panic!("{side} run failed: {e}. In a network-free environment, pass --mock.")
+    });
+
+    record::log_round_metrics(&mut rv, &result.round_history);
+    record::log_run_scope(&mut rv, &result);
+    record::log_llm_metrics(&mut rv, &result.metadata);
+    let observed: Vec<u64> = result
+        .round_history
+        .iter()
+        .map(|r| r.round as u64)
+        .collect();
+    record::log_terminal(&mut rv, side, args.seed, args.rounds, observed, &result);
+
+    let artifacts = rv.dir().join("artifacts").to_string_lossy().into_owned();
+    ensure_output_dir(&artifacts);
+    save_culture_grid(&result.world, &artifacts, "culture_grid_final.csv");
+
+    rv.finish().expect("runvault: 比較の子 run の完了に失敗");
+    result
 }
 
 fn cmd_compare(args: CompareArgs) {
@@ -843,10 +1239,46 @@ fn cmd_compare(args: CompareArgs) {
             args.llm_provider
         );
     }
-    let timestamp = timestamp();
-    let dir_name = format!("compare_{timestamp}");
-    let base_dir = format!("{}/{}", args.output_dir, dir_name);
-    fs::create_dir_all(&base_dir).expect("failed to create compare dir");
+    prepare_cache_dir(llm_provider, &args.cache_path);
+    let llm = make_llm_settings(args.temperature, args.llm_seed, &args.cache_path);
+    let llm_label: &'static str = if args.mock { "llm-mock" } else { "llm-live" };
+
+    let parent_parameters = CompareParameters {
+        sides: vec!["classical", llm_label],
+        llm_provider: llm_provider.label(),
+        mock: args.mock,
+        width: args.width,
+        height: args.height,
+        features: args.features,
+        traits: args.traits,
+        rounds: args.rounds,
+        seed: args.seed,
+        llm_temperature: args.temperature,
+        llm_seed: args.llm_seed,
+        llm_cache_path: cache_path_of(llm_provider, &args.cache_path),
+    };
+
+    // 親は 2 本のシミュレーションではないので master_seed を名乗らない．両側に
+    // 共通のシードは /parameters.seed と seed_pointers 経由で execution_hash に残る．
+    let mut parent = Run::start(
+        RunOptions::new(EXPERIMENT, "compare")
+            .repo_id(REPO_ID)
+            .domain(DOMAIN)
+            .results_root(&args.output_dir)
+            .parameters(&parent_parameters)
+            .expect("runvault: compare の parameters の組み立てに失敗")
+            .hash_exclude(CACHE_POINTER)
+            .seed_pointers(["/seed"])
+            .sweep_parent()
+            .replication(record::replication()),
+    )
+    .expect("runvault: compare 親 run の開始に失敗");
+
+    let sweep_id = parent
+        .sweep_id()
+        .expect("runvault: compare 親に sweep_id がありません")
+        .to_string();
+    let parent_run_uid = parent.run_uid().to_string();
 
     println!("=== YuLan-OneSim — classical vs LLM quantitative comparison ===");
     println!(
@@ -860,95 +1292,88 @@ fn cmd_compare(args: CompareArgs) {
         llm_provider.label(),
         args.mock,
     );
-    println!("output: {base_dir}");
+    println!("output: {}", parent.dir().display());
     println!("----------------------------------------------------------------------");
 
-    // Matched base config (same grid / seed / rounds for both sides).
-    let make_cfg = |provider: Provider| Config {
-        width: args.width,
-        height: args.height,
-        features: args.features,
-        traits: args.traits,
-        events_per_step: 0,
-        rounds: args.rounds,
-        snapshot_interval: 0,
-        provider,
-        seed: Some(args.seed),
-        llm: make_llm_settings(args.temperature, args.llm_seed, &args.cache_path),
-        output_dir: base_dir.clone(),
-    };
-
     // --- classical side (always live; 0 LLM calls) --- //
-    let classical_cfg = make_cfg(Provider::None);
-    let classical = run(&classical_cfg).unwrap_or_else(|e| panic!("classical run failed: {e}"));
-    let classical_side = compare_side("classical", &classical, "none");
+    let classical = run_compare_side(
+        &args,
+        "classical",
+        Provider::None,
+        None,
+        &llm,
+        &sweep_id,
+        &parent_run_uid,
+    );
     println!(
         "[classical] regions={} LC={:.3} GP/N={:.3} converged={} round={} (0 LLM calls)",
-        classical_side.n_stable_regions,
-        classical_side.lc,
-        classical_side.gp_per_agent,
-        classical_side.converged,
-        classical_side.final_round,
+        classical.final_metrics.n_stable_regions,
+        classical.final_metrics.local_convergence,
+        classical.final_metrics.gp_per_agent,
+        classical.converged,
+        classical.final_round,
     );
 
     // --- LLM side (mock = offline; otherwise live via env-built client) --- //
-    let mut llm_cfg = make_cfg(llm_provider);
-    let llm = if args.mock {
-        // The mock client uses an in-memory cache (no file to save to), so clear
-        // the cache_path to skip the (would-fail) save step.
-        llm_cfg.llm.cache_path = None;
-        run_with_client(&llm_cfg, Some(build_mock_client()))
-            .unwrap_or_else(|e| panic!("LLM (mock) run failed: {e}"))
+    let client = if args.mock {
+        share(build_mock_client())
     } else {
-        run(&llm_cfg).unwrap_or_else(|e| {
-            panic!("LLM (live) run failed: {e}. In a network-free environment, pass --mock.")
-        })
+        build_client(&llm)
     };
-    let llm_label = if args.mock { "llm-mock" } else { "llm-live" };
-    let llm_side = compare_side(llm_label, &llm, llm_provider.label());
+    let llm_result = run_compare_side(
+        &args,
+        llm_label,
+        llm_provider,
+        Some(client),
+        &llm,
+        &sweep_id,
+        &parent_run_uid,
+    );
     println!(
         "[{}] regions={} LC={:.3} GP/N={:.3} converged={} round={} LLM_calls={} cache_hit={:.1}%",
         llm_label,
-        llm_side.n_stable_regions,
-        llm_side.lc,
-        llm_side.gp_per_agent,
-        llm_side.converged,
-        llm_side.final_round,
-        llm_side.total_llm_calls,
-        llm_side.cache_hit_rate * 100.0,
+        llm_result.final_metrics.n_stable_regions,
+        llm_result.final_metrics.local_convergence,
+        llm_result.final_metrics.gp_per_agent,
+        llm_result.converged,
+        llm_result.final_round,
+        llm_result.metadata.total(),
+        llm_result.metadata.cache_hit_rate() * 100.0,
     );
 
-    let report = serde_json::json!({
-        "command": "compare",
-        "matched_config": {
-            "width": args.width,
-            "height": args.height,
-            "features": args.features,
-            "traits": args.traits,
-            "rounds": args.rounds,
-            "seed": args.seed,
-        },
-        "mock": args.mock,
-        "classical": classical_side,
-        "llm": llm_side,
-        "deltas": {
-            "n_stable_regions": llm_side.n_stable_regions as i64 - classical_side.n_stable_regions as i64,
-            "lc": llm_side.lc - classical_side.lc,
-            "gp": llm_side.gp - classical_side.gp,
-            "gp_per_agent": llm_side.gp_per_agent - classical_side.gp_per_agent,
-            "final_round": llm_side.final_round as i64 - classical_side.final_round as i64,
-        },
-        "note": "Matched grid/seed/rounds. The classical side is the deterministic Axelrod \
-                 baseline (0 LLM calls); the LLM side is the YuLan-OneSim variant. With --mock \
-                 the LLM side is a deterministic scripted client (offline); live LLM numbers \
-                 depend on the model and are pseudo-determinised by the prompt cache.",
-    });
-    let report_path = format!("{base_dir}/compare_report.json");
-    write_json(&report, &report_path).expect("failed to write compare_report.json");
+    // 両側をまたいだ差は «掃引全体の集約» なので親の scope=sweep 指標にする．
+    // 各側の値は子が持っているので，同じ数を 2 箇所には置かない．
+    let c = &classical.final_metrics;
+    let l = &llm_result.final_metrics;
+    parent
+        .log_metrics(
+            record::SWEEP_SCOPE,
+            &[
+                (
+                    "delta_n_stable_regions",
+                    l.n_stable_regions as f64 - c.n_stable_regions as f64,
+                ),
+                ("delta_lc", l.local_convergence - c.local_convergence),
+                ("delta_gp", l.global_polarization - c.global_polarization),
+                ("delta_gp_per_agent", l.gp_per_agent - c.gp_per_agent),
+                (
+                    "delta_final_round",
+                    llm_result.final_round as f64 - classical.final_round as f64,
+                ),
+            ],
+        )
+        .expect("比較の差の記録に失敗");
 
-    let _ = refresh_latest_symlink(&args.output_dir, &dir_name);
+    let dir = parent
+        .finish()
+        .expect("runvault: compare 親 run の完了に失敗");
     println!("----------------------------------------------------------------------");
-    println!("compare done. report → {report_path}");
+    println!("compare done.");
+    println!(
+        "差 (LLM − classical) → {}/metrics.csv (scope=sweep)",
+        dir.display()
+    );
+    println!("各側 → 子 run (subcommand=compare-side)");
 }
 
 // --------------------------------------------------------------------------- //

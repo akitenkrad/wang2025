@@ -40,7 +40,7 @@ RNG_ENGINE     = 1   // scheduler / engine / event site & neighbour draws
 ## Two-layer determinism
 
 - **Lower (deterministic socsim core):** culture init, site/neighbour draws, scheduling, metrics. Bit-reproducible given a seed.
-- **Upper (non-deterministic LLM):** confined to `LLMInteractionMechanism` via `llm.rs`'s `CachingClient<Box<dyn LlmClient>>`. Production wires `FallbackClient<OllamaClient, OpenAiClient>` (Ollama first → OpenAI fallback); tests inject a `socsim_llm::mock::ScriptedClient`. `temperature=0` + fixed seed + the prompt→response cache replay identical responses on re-run. `run_metadata.json` records provider / model / endpoint / temperature / seed / cache-hit.
+- **Upper (non-deterministic LLM):** confined to `LLMInteractionMechanism` via `llm.rs`'s `CachingClient<Box<dyn LlmClient>>`. Production wires `FallbackClient<OllamaClient, OpenAiClient>` (Ollama first → OpenAI fallback); tests inject a `socsim_llm::mock::ScriptedClient`. `temperature=0` + fixed seed + the prompt→response cache replay identical responses on re-run. The run's `run.json` records provider / model / temperature in its `llm` block; the call count and cache-hit rate are run-scope metrics (`llm_calls` / `llm_cache_hits` / `llm_cache_hit_rate`). A run that made no LLM calls has no such rows and no `llm` block — a rate with a zero denominator is undefined, not zero.
 
 ## Equations
 
@@ -77,7 +77,7 @@ and the reproduction helper and visualizer compare both against the `0.35–0.40
 
 ## Intermediate snapshots
 
-When `run --snapshot-interval N` is given with `N > 0`, the run driver clones the culture grid at round 0, every `N` rounds, and the final round into `SimulationResult::snapshots`, written to `snapshots/culture_grid_round_<NNNNNN>.csv` (+ `snapshots/index.json` listing the rounds). The Python `animate` tool renders these into a culture-map montage + GIF. With `N = 0` only the final grid is written (the default).
+When `run --snapshot-interval N` is given with `N > 0`, the run driver clones the culture grid at round 0, every `N` rounds, and the final round into `SimulationResult::snapshots`, written to the run's `artifacts/snapshots/culture_grid_round_<NNNNNN>.csv` (+ `artifacts/snapshots/index.json` listing the rounds). The Python `animate` tool renders these into a culture-map montage + GIF. With `N = 0` only the final grid is written (the default).
 
 ## Behaviour-graph / ODD concept export
 
@@ -85,22 +85,27 @@ YuLan-OneSim constructs, from a natural-language scenario, both an ODD-protocol 
 
 ## Reproduction & comparison harnesses
 
-- `reproduce` runs the four Appendix F / Table 7-2 conditions (F5q10, F5q15, F10q10, F15q15) on a 10×10 grid (classical, offline, 0 LLM calls) and writes `reproduce_<ts>/reproduce_summary.json` (observed mean `n_stable_regions` vs the published target + a PASS/off verdict per condition + mean LC / GP / GP-per-agent) and `reproduce_detail.csv`. The Python `reproduce` tool renders the observed-vs-paper figures.
-- `compare` runs the classical baseline and the LLM variant on a **matched** config (same grid / seed / rounds) and writes `compare_<ts>/compare_report.json` (both sides' metrics + deltas). `--mock` runs the LLM side with a deterministic scripted client so the whole comparison runs offline; live LLM numbers are pseudo-determinised by the prompt cache.
+- `reproduce` runs the four Appendix F / Table 7-2 conditions (F5q10, F5q15, F10q10, F15q15) on a 10×10 grid (classical, offline, 0 LLM calls) as a parent run plus **one child run per condition** (`subcommand=reproduce-condition`). Each child holds its trials as terminal events, its condition means as run-scope metrics (`mean_n_stable_regions` and friends), and Axelrod's published target — with its source — in its `reference.csv`. The tolerance band is *ours*, not the paper's, so it and the PASS/off verdict live in the parent's `artifacts/reproduce_verdicts.csv` instead. The Python `reproduce` tool renders the observed-vs-paper figures.
+- `compare` runs the classical baseline and the LLM variant on a **matched** config (same grid / seed / rounds) as a parent plus **one child run per side** (`subcommand=compare-side`). Each side is a whole simulation of the same board differing only in mechanism, so each gets its own `metrics.csv` and its own `llm` block; putting both in one run would collide on the metric primary key and force one run to name two models. The differences between the sides are a cross-condition aggregate and sit once, on the parent, as `scope=sweep` metrics (`delta_lc` and friends). `--mock` runs the LLM side with a deterministic scripted client so the whole comparison runs offline; live LLM numbers are pseudo-determinised by the prompt cache.
 
 ## Outputs
 
-`results/{timestamp}/` (+ a `latest` symlink):
+Where the results go is [runvault](https://github.com/akitenkrad/rs-runvault)'s business: one execution is one run directory, `<results-root>/culture-llm/<run_slug>/`, named by `Run::start`. Nothing here makes a timestamped directory or a `latest` symlink of its own. Locate a run with `runvault path --experiment culture-llm --latest --subcommand <sub>`.
 
-- `config.json` — run parameters.
-- `metrics.csv` — long-format, one row per round: `round, lc, gp, gp_per_agent, n_stable_regions, max_region_size, n_distinct_cultures`.
-- `culture_grid_final.csv` — final culture grid (`row, col, culture`) for the culture-map visualization.
-- `run_metadata.json` — provider / model / endpoint / temperature / seed / cache-hit / converged / final_round.
-- `behavior_graph.json` — the behaviour-graph / ODD concept export (every `run`).
-- `snapshots/culture_grid_round_<NNNNNN>.csv` + `snapshots/index.json` — intermediate culture grids (only with `--snapshot-interval N > 0`).
-- `sweep_summary.csv` + `sweep_config.json` — for the `sweep` subcommand.
-- `reproduce_<ts>/{reproduce_summary.json, reproduce_detail.csv, figures/}` — for `reproduce`.
-- `compare_<ts>/compare_report.json` — for `compare`.
+- `config.json` — an envelope; the conditions sit under `parameters`. `llm_cache_path` is a *place* rather than a condition, so it is excluded from `config_hash`.
+- `run.json` — run identity: subcommand, seeds, lineage, the `llm` block, the replication metadata.
+- `metrics.csv` — long form (`run_uid, step, step_unit, scope, name, value`). Per round (`step_unit=round`, `scope=run`): `lc`, `gp`, `gp_per_agent`, `n_stable_regions`, `max_region_size`, `n_distinct_cultures`. Without a step: `converged`, `final_round`, and on the LLM path `llm_calls` / `llm_cache_hits` / `llm_cache_hit_rate`.
+- `events.jsonl` — one `terminal` line per simulation (`outcome` / `censored` / `budget` / `seed` + the final metrics) plus the `observation` lines saying when it was watched.
+- `reference.csv` — the values the paper printed, with their source. Only the `reproduce` children have one.
+- `artifacts/culture_grid_final.csv` — final culture grid (`row, col, culture`) for the culture-map visualization. A spatial snapshot with no time axis whose `culture` is a label, so a table rather than a metric.
+- `artifacts/behavior_graph.json` — the behaviour-graph / ODD concept export (every `run`).
+- `artifacts/snapshots/culture_grid_round_<NNNNNN>.csv` + `artifacts/snapshots/index.json` — intermediate culture grids (only with `--snapshot-interval N > 0`).
+- `artifacts/reproduce_verdicts.csv` — the tolerance band and the PASS/off verdict (`reproduce` parent only). Neither a metric nor a reported value.
+- `manifest.csv` / `status.json` — settled by `finish()`. Figures drawn afterwards go *beside* the run, in `<results-root>/culture-llm/figures/<run_slug>/`, so they cannot disagree with the manifest.
+
+The subcommands map onto runs as: `run` → one run; `sweep` → a parent (`sweep`) + one child per `(F, q)` cell (`sweep-point`); `reproduce` → a parent + one child per condition (`reproduce-condition`); `compare` → a parent + one child per side (`compare-side`); `examples/mock_smoke` → one run (`mock-smoke`). A child never reuses the `run` subcommand name, so `runvault path --subcommand run` is unambiguous.
+
+Result directories written before the migration to runvault (`results/<timestamp>/`) are not rewritten; pass one to a tool's `--results-dir` and it is read as it stands.
 
 ---
 *This file was generated by Claude Code.*

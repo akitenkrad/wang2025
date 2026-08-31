@@ -2,8 +2,8 @@
 """animate.py — intermediate culture-map animation / montage.
 
 Reads the per-round culture-grid snapshots written by `culture-llm run
---snapshot-interval N` (under `<results-dir>/snapshots/culture_grid_round_*.csv`,
-indexed by `snapshots/index.json`) and renders:
+--snapshot-interval N` (under the run's `artifacts/snapshots/`, indexed by
+`artifacts/snapshots/index.json`) and renders:
 
   - culture_animation.gif : an animated culture map over rounds (if Pillow is
                             available; one frame per snapshot).
@@ -14,7 +14,7 @@ snapshots** so a region keeps its colour through the animation.
 
 Usage:
     uv run culture-llm-tools animate
-    uv run culture-llm-tools animate --results-dir results/latest --fps 4
+    uv run culture-llm-tools animate --results-dir "$(runvault path --experiment culture-llm --latest --subcommand run --standalone)" --fps 4
 """
 
 from __future__ import annotations
@@ -27,29 +27,35 @@ import os
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from runvault.read import artifacts_dir, figures_dir, runvault_path
+
+EXPERIMENT = "culture-llm"
 
 COLOR_BG = "#FAFAF8"
 
 
-def load_index(results_dir: str) -> list[int] | None:
-    path = os.path.join(results_dir, "snapshots", "index.json")
+def snapshots_dir(run_dir: str) -> str:
+    return os.path.join(artifacts_dir(run_dir), "snapshots")
+
+
+def load_index(run_dir: str) -> list[int] | None:
+    path = os.path.join(snapshots_dir(run_dir), "index.json")
     if not os.path.exists(path):
         return None
     with open(path, encoding="utf-8") as f:
         return json.load(f).get("rounds", [])
 
 
-def load_snapshot(results_dir: str, round_: int) -> pd.DataFrame:
+def load_snapshot(run_dir: str, round_: int) -> pd.DataFrame:
     name = f"culture_grid_round_{round_:06}.csv"
-    path = os.path.join(results_dir, "snapshots", name)
-    return pd.read_csv(path, dtype={"culture": str})
+    return pd.read_csv(os.path.join(snapshots_dir(run_dir), name), dtype={"culture": str})
 
 
-def build_global_colormap(results_dir: str, rounds: list[int]) -> dict[str, int]:
+def build_global_colormap(run_dir: str, rounds: list[int]) -> dict[str, int]:
     """Assign each distinct culture string a stable colour id across all frames."""
     cultures: set[str] = set()
     for r in rounds:
-        df = load_snapshot(results_dir, r)
+        df = load_snapshot(run_dir, r)
         cultures.update(df["culture"].unique())
     return {c: i for i, c in enumerate(sorted(cultures))}
 
@@ -63,7 +69,7 @@ def to_grid(df: pd.DataFrame, colormap: dict[str, int]) -> np.ndarray:
     return grid
 
 
-def render_montage(results_dir: str, output_dir: str, rounds: list[int],
+def render_montage(run_dir: str, output_dir: str, rounds: list[int],
                    colormap: dict[str, int]) -> str:
     n = len(rounds)
     ncols = min(n, 5)
@@ -73,7 +79,7 @@ def render_montage(results_dir: str, output_dir: str, rounds: list[int],
     vmax = max(len(colormap) - 1, 1)
     for k, r in enumerate(rounds):
         ax = axes[k // ncols][k % ncols]
-        grid = to_grid(load_snapshot(results_dir, r), colormap)
+        grid = to_grid(load_snapshot(run_dir, r), colormap)
         ax.imshow(grid, cmap="tab20", interpolation="nearest", vmin=0, vmax=vmax)
         ax.set_title(f"round {r}", fontsize=9)
         ax.set_xticks([])
@@ -89,7 +95,7 @@ def render_montage(results_dir: str, output_dir: str, rounds: list[int],
     return out
 
 
-def render_gif(results_dir: str, output_dir: str, rounds: list[int],
+def render_gif(run_dir: str, output_dir: str, rounds: list[int],
                colormap: dict[str, int], fps: int) -> str | None:
     try:
         from PIL import Image  # noqa: PLC0415
@@ -102,7 +108,7 @@ def render_gif(results_dir: str, output_dir: str, rounds: list[int],
     for r in rounds:
         fig, ax = plt.subplots(figsize=(4, 4))
         fig.patch.set_facecolor(COLOR_BG)
-        grid = to_grid(load_snapshot(results_dir, r), colormap)
+        grid = to_grid(load_snapshot(run_dir, r), colormap)
         ax.imshow(grid, cmap="tab20", interpolation="nearest", vmin=0, vmax=vmax)
         ax.set_title(f"round {r}")
         ax.set_xticks([])
@@ -124,28 +130,35 @@ def render_gif(results_dir: str, output_dir: str, rounds: list[int],
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="culture-llm-tools animate", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--results-dir", "--results_dir", default="results/latest")
-    parser.add_argument("--output-dir", "--output_dir", default=None)
+    parser.add_argument("--results-dir", "--results_dir", default=None,
+                        help="runvault の run ディレクトリ (未指定時は最新の run)")
+    parser.add_argument("--results-root", "--results_root", default="results")
+    parser.add_argument("--output-dir", "--output_dir", default=None,
+                        help="図の保存先 (default: results/culture-llm/figures/{run_slug})")
     parser.add_argument("--fps", type=int, default=4, help="animation frames per second")
     parser.add_argument("--no-gif", action="store_true", help="montage only (skip GIF)")
     args = parser.parse_args(argv)
 
-    results_dir = args.results_dir
-    output_dir = args.output_dir or results_dir
+    run_dir = args.results_dir
+    if run_dir is None:
+        run_dir = runvault_path(
+            EXPERIMENT, args.results_root, subcommand="run", standalone=True
+        )
+    output_dir = args.output_dir or figures_dir(run_dir)
     os.makedirs(output_dir, exist_ok=True)
 
-    rounds = load_index(results_dir)
+    rounds = load_index(run_dir)
     if not rounds:
         print(
-            f"[animate] no snapshots in {results_dir}/snapshots/.\n"
+            f"[animate] no snapshots in {snapshots_dir(run_dir)}.\n"
             f"  Re-run with: culture-llm run ... --snapshot-interval N",
         )
         return 1
 
-    colormap = build_global_colormap(results_dir, rounds)
-    render_montage(results_dir, output_dir, rounds, colormap)
+    colormap = build_global_colormap(run_dir, rounds)
+    render_montage(run_dir, output_dir, rounds, colormap)
     if not args.no_gif:
-        render_gif(results_dir, output_dir, rounds, colormap, args.fps)
+        render_gif(run_dir, output_dir, rounds, colormap, args.fps)
     return 0
 
 

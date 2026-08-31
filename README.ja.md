@@ -20,7 +20,7 @@ LLM 出力は socsim の bit 再現性の **外側** にあるため，設計を
 - **決定論的 socsim コア** — 文化初期化・サイト/隣人抽選 (`ctx.rng`, ChaCha20)・スケジュール・指標・収束判定．シードを固定すれば bit 単位で再現する．古典プロバイダは完全にこの層に閉じ，LLM 呼び出しは **0 回**．
 - **非決定的 LLM レイヤ** — 採用判断．`socsim-llm` の `CachingClient` (`hash(prompt+model)` → 応答キャッシュ)・`temperature=0`・固定 seed で擬似決定論化する．プロバイダ順序は `socsim-llm` の `FallbackClient` による **Ollama 第一 → OpenAI フォールバック**．
 
-再現性の本体はモデルではなく **キャッシュ** である．各実行は `run_metadata.json` に provider / model / endpoint / temperature / seed / cache-hit 率を記録する．ローカル既定モデル (`llama3.2`) は論文と異なるため，LLM 再現目標は **定性的** (モノカルチャ⇄ポリカルチャ転移が同じ) とし，**古典**経路は **定量的** に再現する．
+再現性の本体はモデルではなく **キャッシュ** である．LLM を使った実行は provider / model / temperature を `run.json` の `llm` ブロックに，呼び出し数と cache-hit 率を run スコープ指標に記録する．LLM を叩かなかった run はどちらも持たない．ローカル既定モデル (`llama3.2`) は論文と異なるため，LLM 再現目標は **定性的** (モノカルチャ⇄ポリカルチャ転移が同じ) とし，**古典**経路は **定量的** に再現する．
 
 ## インストールとクイックスタート
 
@@ -53,7 +53,7 @@ cargo run --release -- compare --mock --features 5 --traits 5 --rounds 100 --see
 uv sync
 uv run culture-llm-tools visualize                 # 文化マップ + LC/GP 時系列
 uv run culture-llm-tools visualize-sweep           # F×q ヒートマップ
-uv run culture-llm-tools show-experiment-settings  # config / sweep_config / run_metadata
+uv run culture-llm-tools show-experiment-settings  # 実験条件 + LLM の来歴
 uv run culture-llm-tools reproduce                 # Table 7-2 観測 vs 論文の図
 uv run culture-llm-tools animate                   # 中間文化マップアニメ / モンタージュ
 uv run culture-llm-tools behavior-graph            # 行動グラフ / ODD 概念図
@@ -65,6 +65,16 @@ LLM **パイプライン** のオフライン (LLM 不要) スモークは scrip
 ```bash
 cargo run --release --example mock_smoke -- results
 ```
+
+## 結果の置き場
+
+記録は [runvault](https://github.com/akitenkrad/rs-runvault) に預けている．1 回の実行が 1 つの run ディレクトリ `results/culture-llm/<run_slug>/` になり，`config.json` (実験条件)・`run.json` (同一性・シード・lineage・`llm` ブロック)・`metrics.csv` (ラウンドごとと run 全体の数値，long 形式)・`events.jsonl` (シミュレーション 1 本につき `terminal` 1 行)・`artifacts/` (文化グリッド・スナップショット・ODD エクスポート) を持つ．掃引・再現バッチ・比較はいずれも «親 run 1 本 + セル / 条件 / 片側ごとの子 run» の形になる．run の場所は次で分かる:
+
+```bash
+runvault path --experiment culture-llm --latest --subcommand run --standalone
+```
+
+Python ツールも `--results-dir` を省略すると同じ問いを runvault に投げる．詳細は [アーキテクチャ § 出力](docs/architecture.ja.md#出力)．
 
 ## ドキュメント
 

@@ -5,8 +5,6 @@
 //! plus the `Provider` switch that selects the classical vs LLM interaction
 //! mechanism. The two interaction mechanisms are mutually exclusive.
 
-use serde::Serialize;
-
 // --------------------------------------------------------------------------- //
 // Provider
 // --------------------------------------------------------------------------- //
@@ -96,8 +94,6 @@ pub struct Config {
     pub seed: Option<u64>,
     /// LLM-layer settings.
     pub llm: LlmSettings,
-    /// Output directory.
-    pub output_dir: String,
 }
 
 impl Default for Config {
@@ -114,7 +110,6 @@ impl Default for Config {
             provider: Provider::None,
             seed: Some(42),
             llm: LlmSettings::default(),
-            output_dir: "results".to_string(),
         }
     }
 }
@@ -131,45 +126,6 @@ impl Config {
             self.n_sites()
         } else {
             self.events_per_step
-        }
-    }
-}
-
-/// JSON representation of a `run`'s `config.json`.
-#[derive(Serialize)]
-pub struct RunConfigJson {
-    pub command: &'static str,
-    pub width: usize,
-    pub height: usize,
-    pub features: usize,
-    pub traits: usize,
-    pub events_per_step: usize,
-    pub rounds: usize,
-    pub snapshot_interval: usize,
-    pub provider: String,
-    pub seed: Option<u64>,
-    pub llm_temperature: f32,
-    pub llm_seed: u64,
-    pub output_dir: String,
-}
-
-impl Config {
-    /// Build the `config.json` representation.
-    pub fn to_run_config_json(&self) -> RunConfigJson {
-        RunConfigJson {
-            command: "run",
-            width: self.width,
-            height: self.height,
-            features: self.features,
-            traits: self.traits,
-            events_per_step: self.effective_events_per_step(),
-            rounds: self.rounds,
-            snapshot_interval: self.snapshot_interval,
-            provider: self.provider.label().to_string(),
-            seed: self.seed,
-            llm_temperature: self.llm.temperature,
-            llm_seed: self.llm.seed,
-            output_dir: self.output_dir.clone(),
         }
     }
 }

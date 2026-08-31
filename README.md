@@ -20,7 +20,7 @@ LLM output is **outside** socsim's bit-reproducibility, so the design splits int
 - **Deterministic socsim core** — culture initialisation, site/neighbour sampling (`ctx.rng`, ChaCha20), scheduling, metrics and convergence. Given a seed this reproduces bit-for-bit. The classical provider lives entirely here and makes **zero LLM calls**.
 - **Non-deterministic LLM layer** — the adoption decision. Pseudo-determinised by `socsim-llm`'s `CachingClient` (a `hash(prompt+model)` → response cache), `temperature=0` and a fixed seed. The provider order is **Ollama first → OpenAI fallback** via `socsim-llm`'s `FallbackClient`.
 
-The cache — not the model — is the reproducibility mechanism: a warm cache replays identical responses. Each run writes `run_metadata.json` recording provider / model / endpoint / temperature / seed / cache-hit rate. Because the local default model (`llama3.2`) differs from the paper, LLM reproduction targets are **qualitative** (same monoculture↔polyculture transition); the **classical** path is reproduced **quantitatively**.
+The cache — not the model — is the reproducibility mechanism: a warm cache replays identical responses. Each LLM run records provider / model / temperature in `run.json`'s `llm` block, and its call count and cache-hit rate as run-scope metrics; a run that made no LLM calls records neither. Because the local default model (`llama3.2`) differs from the paper, LLM reproduction targets are **qualitative** (same monoculture↔polyculture transition); the **classical** path is reproduced **quantitatively**.
 
 ## Install & Quick start
 
@@ -53,7 +53,7 @@ cargo run --release -- compare --mock --features 5 --traits 5 --rounds 100 --see
 uv sync
 uv run culture-llm-tools visualize                 # culture map + LC/GP time series
 uv run culture-llm-tools visualize-sweep           # F×q heatmaps
-uv run culture-llm-tools show-experiment-settings  # config / sweep_config / run_metadata
+uv run culture-llm-tools show-experiment-settings  # conditions + LLM provenance
 uv run culture-llm-tools reproduce                 # Table 7-2 observed-vs-paper figures
 uv run culture-llm-tools animate                   # intermediate culture-map animation / montage
 uv run culture-llm-tools behavior-graph            # behaviour-graph / ODD concept diagram
@@ -65,6 +65,16 @@ An offline (LLM-free) smoke of the LLM **pipeline** is available via a scripted 
 ```bash
 cargo run --release --example mock_smoke -- results
 ```
+
+## Where the results go
+
+Recording is delegated to [runvault](https://github.com/akitenkrad/rs-runvault): one execution is one run directory, `results/culture-llm/<run_slug>/`, holding `config.json` (the conditions), `run.json` (identity, seeds, lineage, the `llm` block), `metrics.csv` (per-round and run-scope numbers, long form), `events.jsonl` (one `terminal` line per simulation) and `artifacts/` (the culture grid, the snapshots, the ODD export). A sweep, a reproduction batch and a comparison are each a parent run plus one child run per cell / condition / side. Find a run with:
+
+```bash
+runvault path --experiment culture-llm --latest --subcommand run --standalone
+```
+
+The Python tools ask runvault the same question when `--results-dir` is omitted. See [Architecture § Outputs](docs/architecture.md#outputs).
 
 ## Documentation
 

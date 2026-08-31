@@ -40,7 +40,7 @@ RNG_ENGINE     = 1   // scheduler / engine / イベントのサイト・隣人�
 ## 二層決定論
 
 - **下層 (決定論的 socsim コア):** 文化初期化・サイト/隣人抽選・スケジュール・指標．シード固定で bit 再現．
-- **上層 (非決定的 LLM):** `llm.rs` の `CachingClient<Box<dyn LlmClient>>` 経由で `LLMInteractionMechanism` に閉じる．本番は `FallbackClient<OllamaClient, OpenAiClient>` (Ollama 第一 → OpenAI フォールバック)，テストは `socsim_llm::mock::ScriptedClient` を注入．`temperature=0` + 固定 seed + プロンプト→応答キャッシュで再実行時に同一応答を再生．`run_metadata.json` に provider / model / endpoint / temperature / seed / cache-hit を記録．
+- **上層 (非決定的 LLM):** `llm.rs` の `CachingClient<Box<dyn LlmClient>>` 経由で `LLMInteractionMechanism` に閉じる．本番は `FallbackClient<OllamaClient, OpenAiClient>` (Ollama 第一 → OpenAI フォールバック)，テストは `socsim_llm::mock::ScriptedClient` を注入．`temperature=0` + 固定 seed + プロンプト→応答キャッシュで再実行時に同一応答を再生．provider / model / temperature は run の `run.json` の `llm` ブロックに，呼び出し数と cache-hit 率は run スコープ指標 (`llm_calls` / `llm_cache_hits` / `llm_cache_hit_rate`) に記録する．LLM を 1 度も叩かなかった run にはこれらの行も `llm` ブロックも無い — 分母 0 の率は «0» ではなく «定義できない» からである．
 
 ## 主要数式
 
@@ -77,7 +77,7 @@ GP = |C| / N²                                     (大域分極; 文書記載�
 
 ## 中間スナップショット
 
-`run --snapshot-interval N` で `N > 0` のとき，実行ドライバはラウンド 0・`N` ラウンドごと・最終ラウンドの文化グリッドを `SimulationResult::snapshots` に複製し，`snapshots/culture_grid_round_<NNNNNN>.csv` (+ ラウンド一覧の `snapshots/index.json`) に書き出す．Python の `animate` ツールがこれらを文化マップのモンタージュ + GIF に描画する．`N = 0` では最終グリッドのみ (既定)．
+`run --snapshot-interval N` で `N > 0` のとき，実行ドライバはラウンド 0・`N` ラウンドごと・最終ラウンドの文化グリッドを `SimulationResult::snapshots` に複製し，run の `artifacts/snapshots/culture_grid_round_<NNNNNN>.csv` (+ ラウンド一覧の `artifacts/snapshots/index.json`) に書き出す．Python の `animate` ツールがこれらを文化マップのモンタージュ + GIF に描画する．`N = 0` では最終グリッドのみ (既定)．
 
 ## 行動グラフ / ODD 概念エクスポート
 
@@ -85,22 +85,27 @@ YuLan-OneSim は自然言語シナリオから ODD プロトコル文書と内�
 
 ## 再現 & 比較ハーネス
 
-- `reproduce` は付録 F / Table 7-2 の 4 条件 (F5q10, F5q15, F10q10, F15q15) を 10×10 グリッドで実行し (古典・オフライン・LLM 呼び出し 0)，`reproduce_<ts>/reproduce_summary.json` (観測平均 `n_stable_regions` 対 論文目標値 + 条件ごとの PASS/off 判定 + 平均 LC / GP / GP-per-agent) と `reproduce_detail.csv` を書き出す．Python の `reproduce` ツールが観測 vs 論文の図を描画する．
-- `compare` は古典ベースラインと LLM 変種を一致条件 (同一グリッド / シード / ラウンド) で実行し，`compare_<ts>/compare_report.json` (両者の指標 + 差分) を書き出す．`--mock` は LLM 側を決定論的スクリプトクライアントにし比較全体をオフラインで実行する．実 LLM の数値はプロンプトキャッシュで擬似決定論化される．
+- `reproduce` は付録 F / Table 7-2 の 4 条件 (F5q10, F5q15, F10q10, F15q15) を 10×10 グリッドで実行する (古典・オフライン・LLM 呼び出し 0)．親 run 1 本 + **条件ごとの子 run** (`subcommand=reproduce-condition`) の形で，子が試行を終端イベントに，条件の平均を run スコープ指標 (`mean_n_stable_regions` ほか) に，Axelrod の報告値を出典つきで `reference.csv` に持つ．許容幅は論文のものではなく**こちらが置いたもの**なので，PASS/off の判定とともに親の `artifacts/reproduce_verdicts.csv` に置く．Python の `reproduce` ツールが観測 vs 論文の図を描画する．
+- `compare` は古典ベースラインと LLM 変種を一致条件 (同一グリッド / シード / ラウンド) で実行する．親 1 本 + **片側ごとの子 run** (`subcommand=compare-side`) の形にした．両側とも «同じ盤面を機構だけ変えて回した 1 本のシミュレーション» なので，それぞれが自分の `metrics.csv` と自分の `llm` ブロックを持つ．1 本の run に押し込むと指標の主キーが衝突し，1 つの run が 2 つのモデルを名乗ることになる．両側の差は «条件をまたいだ集約» なので親の `scope=sweep` 指標 (`delta_lc` ほか) に 1 度だけ置く．`--mock` は LLM 側を決定論的スクリプトクライアントにし比較全体をオフラインで実行する．実 LLM の数値はプロンプトキャッシュで擬似決定論化される．
 
 ## 出力
 
-`results/{timestamp}/` (+ `latest` シンボリックリンク):
+出力の置き場と同一性は [runvault](https://github.com/akitenkrad/rs-runvault) が持つ．1 回の実行が 1 つの run ディレクトリ `<results-root>/culture-llm/<run_slug>/` になり，命名は `Run::start` が行う．こちらでタイムスタンプ付きディレクトリも `latest` シンボリックリンクも作らない．run の場所は `runvault path --experiment culture-llm --latest --subcommand <sub>` で解決する．
 
-- `config.json` — 実行パラメータ．
-- `metrics.csv` — long-format，1 ラウンド 1 行: `round, lc, gp, gp_per_agent, n_stable_regions, max_region_size, n_distinct_cultures`.
-- `culture_grid_final.csv` — 最終文化グリッド (`row, col, culture`)，文化マップ可視化用．
-- `run_metadata.json` — provider / model / endpoint / temperature / seed / cache-hit / converged / final_round.
-- `behavior_graph.json` — 行動グラフ / ODD 概念エクスポート (毎回の `run`)．
-- `snapshots/culture_grid_round_<NNNNNN>.csv` + `snapshots/index.json` — 中間文化グリッド (`--snapshot-interval N > 0` のときのみ)．
-- `sweep_summary.csv` + `sweep_config.json` — `sweep` サブコマンド用．
-- `reproduce_<ts>/{reproduce_summary.json, reproduce_detail.csv, figures/}` — `reproduce` 用．
-- `compare_<ts>/compare_report.json` — `compare` 用．
+- `config.json` — 封筒．実験条件は `parameters` の下．`llm_cache_path` は条件ではなく «置き場» なので `config_hash` から外してある．
+- `run.json` — run の同一性: サブコマンド・シード・lineage・`llm` ブロック・再現実験のメタデータ．
+- `metrics.csv` — long 形式 (`run_uid, step, step_unit, scope, name, value`)．ラウンドごと (`step_unit=round`, `scope=run`): `lc`, `gp`, `gp_per_agent`, `n_stable_regions`, `max_region_size`, `n_distinct_cultures`．step 無し: `converged`, `final_round`，LLM 経路では `llm_calls` / `llm_cache_hits` / `llm_cache_hit_rate`．
+- `events.jsonl` — シミュレーション 1 本につき `terminal` 1 行 (`outcome` / `censored` / `budget` / `seed` + 最終指標) と，いつ観測したかを言う `observation` 行．
+- `reference.csv` — 論文が印字した値と出典．持っているのは `reproduce` の子だけ．
+- `artifacts/culture_grid_final.csv` — 最終文化グリッド (`row, col, culture`)，文化マップ可視化用．時間軸を持たない空間スナップショットで `culture` はラベルなので，指標ではなく表．
+- `artifacts/behavior_graph.json` — 行動グラフ / ODD 概念エクスポート (毎回の `run`)．
+- `artifacts/snapshots/culture_grid_round_<NNNNNN>.csv` + `artifacts/snapshots/index.json` — 中間文化グリッド (`--snapshot-interval N > 0` のときのみ)．
+- `artifacts/reproduce_verdicts.csv` — 許容幅と PASS/off の判定 (`reproduce` の親のみ)．指標でも報告値でもない．
+- `manifest.csv` / `status.json` — `finish()` が確定させる．後から描く図は run の *隣* (`<results-root>/culture-llm/figures/<run_slug>/`) に置き，manifest と食い違わないようにする．
+
+サブコマンドと run の対応: `run` → run 1 本，`sweep` → 親 (`sweep`) + `(F, q)` セルごとの子 (`sweep-point`)，`reproduce` → 親 + 条件ごとの子 (`reproduce-condition`)，`compare` → 親 + 片側ごとの子 (`compare-side`)，`examples/mock_smoke` → run 1 本 (`mock-smoke`)．子が `run` を名乗ることは無いので，`runvault path --subcommand run` は一意である．
+
+runvault 以前に書かれた `results/<timestamp>/` は書き換えていない．各ツールの `--results-dir` に直接渡せば従来どおり読める．
 
 ---
 *This file was generated by Claude Code.*

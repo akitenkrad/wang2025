@@ -36,7 +36,7 @@ main = build_dispatcher(
             "culture_llm_tools.visualize_sweep:main",
         ),
         "show-experiment-settings": (
-            "print a results directory's settings (config / sweep_config / run_metadata)",
+            "print a run directory's conditions and LLM provenance",
             "culture_llm_tools.show_experiment_settings:main",
         ),
         "reproduce": (
@@ -52,7 +52,7 @@ main = build_dispatcher(
             "culture_llm_tools.behavior_graph:main",
         ),
         "compare-report": (
-            "classical vs LLM quantitative comparison figure (compare_report.json)",
+            "classical vs LLM quantitative comparison figure (from a compare parent run)",
             "culture_llm_tools.compare_report:main",
         ),
     },
