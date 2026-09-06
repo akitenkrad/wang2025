@@ -25,16 +25,17 @@ use std::path::Path;
 use std::rc::Rc;
 
 use clap::{Parser, Subcommand};
-use runvault::{Lineage, Run, RunOptions};
+use runvault::{Lineage, Run, RunOptions, Stage};
 use serde::Serialize;
 
 use culture_llm::config::{parse_provider, Config, LlmSettings, Provider};
 use culture_llm::llm::{build_live_client, wrap_client, CultureClient};
-use culture_llm::mechanisms::SharedClient;
+use culture_llm::mechanisms::{no_observer, EventObserver, SharedClient};
 use culture_llm::odd::{build_behavior_graph, save_behavior_graph};
 use culture_llm::record::{self, TrialOutcome, DOMAIN, EXPERIMENT, REPO_ID};
 use culture_llm::simulation::{
-    ensure_output_dir, run_with_shared_client, save_culture_grid, save_snapshots, SimulationResult,
+    ensure_output_dir, run_with_shared_client_observed, save_culture_grid, save_snapshots,
+    SimulationResult,
 };
 
 use socsim_llm::mock::ScriptedClient;
@@ -385,6 +386,40 @@ struct CompareSideParameters {
 // helpers
 // --------------------------------------------------------------------------- //
 
+/// Wrap a stage so that a mechanism inside the engine can bump it.
+///
+/// On the LLM path the decision is taken inside `LLMInteractionMechanism`,
+/// which enters the engine as a `Box<dyn Mechanism<_>>` — `'static`, and so
+/// unable to borrow the caller's `Stage`. The stage is shared through an `Rc`
+/// instead and taken back with [`close_shared`] once the work is over. The
+/// classical path has no such mechanism and bumps the same cell directly
+/// through [`tick_shared`].
+fn share_stage(stage: Stage) -> (Rc<RefCell<Option<Stage>>>, EventObserver) {
+    let cell = Rc::new(RefCell::new(Some(stage)));
+    let observer: EventObserver = {
+        let cell = Rc::clone(&cell);
+        Rc::new(RefCell::new(move || tick_shared(&cell)))
+    };
+    (cell, observer)
+}
+
+/// One unit of the shared stage's work is done.
+fn tick_shared(cell: &Rc<RefCell<Option<Stage>>>) {
+    if let Some(stage) = cell.borrow_mut().as_mut() {
+        stage.tick();
+    }
+}
+
+/// Take the shared stage back and close it.
+///
+/// `manifest.csv` is sealed by `finish()`, and a line written after that is a
+/// digest the manifest disagrees with — so this always runs first.
+fn close_shared(cell: &Rc<RefCell<Option<Stage>>>) {
+    if let Some(stage) = cell.borrow_mut().take() {
+        stage.close();
+    }
+}
+
 /// Enumerate an inclusive range with a step (min..=max).
 fn enumerate_range(min: usize, max: usize, step: usize) -> Vec<usize> {
     let mut v = Vec::new();
@@ -570,6 +605,22 @@ fn cmd_run(args: RunArgs) {
     );
     println!("----------------------------------------------------------------------");
 
+    // 単位は経路で決まる．古典経路の費用は 1 ラウンド (= `events_per_step` 個の
+    // 微視イベント) にあり，1 試行 (10×10・rounds 20000) は 0.07 秒で終わるので
+    // ラウンドを数えれば足りる．LLM 経路では 1 ラウンドがそのまま
+    // `events_per_step` 回のモデル呼び出しで，既定の 10×10 なら 100 回 ≒ 22 秒
+    // (ローカル Ollama llama3.2 で 1 回 0.22 秒を実測) — ラウンドでは粗すぎる．
+    //
+    // どちらも分母を持たない．`ConvergenceMechanism` が吸収状態に達した時点で
+    // `request_stop` を掛けるので，`runs * rounds` は到達するとは限らない上限で
+    // あって総数ではない (既定の 20000 ラウンドに達する前にほぼ必ず止まる)．
+    let is_llm = provider.is_llm();
+    let (stage, observer) = share_stage(if is_llm {
+        rv.unbounded_stage("decisions")
+    } else {
+        rv.unbounded_stage("rounds")
+    });
+
     let mut sum_regions = 0.0f64;
     let mut sum_lc = 0.0f64;
     let mut sum_gp = 0.0f64;
@@ -583,8 +634,17 @@ fn cmd_run(args: RunArgs) {
             seed: Some(seed),
             ..base_cfg.clone()
         };
-        let result = run_with_shared_client(&cfg, client.clone())
-            .unwrap_or_else(|e| panic!("run failed: {e}"));
+        let result = run_with_shared_client_observed(
+            &cfg,
+            client.clone(),
+            |_| {
+                if !is_llm {
+                    tick_shared(&stage);
+                }
+            },
+            Rc::clone(&observer),
+        )
+        .unwrap_or_else(|e| panic!("run failed: {e}"));
         if result.converged {
             n_converged += 1;
         }
@@ -645,6 +705,7 @@ fn cmd_run(args: RunArgs) {
         result.llm_model,
     );
 
+    close_shared(&stage);
     let dir = rv.finish().expect("runvault: run の完了に失敗");
     println!("metrics  → {}/metrics.csv", dir.display());
     println!("terminal → {}/events.jsonl", dir.display());
@@ -742,6 +803,19 @@ fn cmd_sweep(args: SweepArgs) {
     );
     println!("------------------------------------------------------------");
 
+    // 古典経路は 1 試行 0.07 秒 (既定の 270 試行で 18.9 秒を実測) なので，単位は
+    // 試行でよく，本数 (`n_total`) は正確に数えられるので分母を持てる — 1 試行の
+    // 長さは吸収状態で早く終わって揃わないが，«何本回すか» はそれとは別に確定して
+    // いる．LLM 経路では 1 試行が数万回のモデル呼び出し (10×10 で 1 ラウンド 100
+    // 回) になるので試行では粗すぎ，単位は採用判断 1 回に落ちる — そちらは早期
+    // 終了のせいで総数が事前に数えられず，分母を持たない．
+    let is_llm = provider.is_llm();
+    let (stage, observer) = share_stage(if is_llm {
+        parent.unbounded_stage("decisions")
+    } else {
+        parent.stage("trials", n_total)
+    });
+
     let mut idx = 0usize;
     for &features in &feature_vals {
         for &traits in &traits_vals {
@@ -803,8 +877,16 @@ fn cmd_sweep(args: SweepArgs) {
                     seed: Some(seed),
                     llm: llm.clone(),
                 };
-                let result = run_with_shared_client(&cfg, client.clone())
-                    .unwrap_or_else(|e| panic!("run failed: {e}"));
+                let result = run_with_shared_client_observed(
+                    &cfg,
+                    client.clone(),
+                    |_| {},
+                    Rc::clone(&observer),
+                )
+                .unwrap_or_else(|e| panic!("run failed: {e}"));
+                if !is_llm {
+                    tick_shared(&stage);
+                }
                 // 掃引が見るのは各試行の最終ラウンドだけなので，観測時刻もそこ 1 点．
                 record::log_terminal(
                     &mut child,
@@ -835,6 +917,7 @@ fn cmd_sweep(args: SweepArgs) {
         }
     }
 
+    close_shared(&stage);
     let dir = parent
         .finish()
         .expect("runvault: sweep 親 run の完了に失敗");
@@ -985,6 +1068,7 @@ fn cmd_reproduce(args: ReproduceArgs) {
     println!("----------------------------------------------------------------------");
 
     let mut verdicts: Vec<VerdictRow> = Vec::with_capacity(REPRO_CONDITIONS.len());
+    let is_llm = provider.is_llm();
 
     for cond in REPRO_CONDITIONS.iter() {
         let params = ReproduceConditionParameters {
@@ -1035,6 +1119,21 @@ fn cmd_reproduce(args: ReproduceArgs) {
             .send()
             .expect("論文の報告値の記録に失敗");
 
+        // 条件ごとに別の stage にし，条件 id をその名前にする．F と q が変われば
+        // 吸収状態までの長さが桁で変わる (F5q15 は 19 領域まで割れて長く，F10q10 /
+        // F15q15 は 1 領域へ一気に潰れる) ので，4 条件を 1 つの stage にまとめる
+        // と，速い条件が遅い条件の見積りを引っぱる．重みを与える手もあるが，重みは
+        // 走らせる前には測れない — 分けるほうが正しい．
+        //
+        // 古典経路は 1 試行 0.05 秒 (既定の 4 条件 × 30 試行で 5.6 秒を実測) なので
+        // 単位は試行で，条件あたりの本数 (`runs`) は正確なので分母を持てる．LLM
+        // 経路は単位が採用判断 1 回に落ち，早期終了のせいで総数が数えられない．
+        let (stage, observer) = share_stage(if is_llm {
+            parent.unbounded_stage(cond.id)
+        } else {
+            parent.stage(cond.id, runs)
+        });
+
         let mut trials: Vec<TrialOutcome> = Vec::with_capacity(runs);
         let mut tally = LlmTally::default();
         for run_idx in 0..runs {
@@ -1051,8 +1150,12 @@ fn cmd_reproduce(args: ReproduceArgs) {
                 seed: Some(seed),
                 llm: llm.clone(),
             };
-            let result = run_with_shared_client(&cfg, client.clone())
-                .unwrap_or_else(|e| panic!("reproduce run failed: {e}"));
+            let result =
+                run_with_shared_client_observed(&cfg, client.clone(), |_| {}, Rc::clone(&observer))
+                    .unwrap_or_else(|e| panic!("reproduce run failed: {e}"));
+            if !is_llm {
+                tick_shared(&stage);
+            }
             record::log_terminal(
                 &mut child,
                 &format!("trial-{run_idx}"),
@@ -1064,6 +1167,7 @@ fn cmd_reproduce(args: ReproduceArgs) {
             tally.add(&result);
             trials.push(TrialOutcome::from_result(&result));
         }
+        close_shared(&stage);
         record::log_condition_summary(&mut child, &trials);
         record::log_llm_totals(&mut child, tally.calls, tally.hits);
 
@@ -1143,6 +1247,7 @@ fn cmd_reproduce(args: ReproduceArgs) {
 /// 実行が 2 つある — 子 run に割っても起きていない実行を主張することにはならない．
 /// 逆に 1 本の run に押し込むと，`metrics.csv` の主キーが両側で衝突し，`llm`
 /// ブロックが «モデル無し» と «llama3.2» の 2 つを同時に名乗ることになる．
+#[allow(clippy::too_many_arguments)]
 fn run_compare_side(
     args: &CompareArgs,
     side: &'static str,
@@ -1151,6 +1256,8 @@ fn run_compare_side(
     llm: &LlmSettings,
     sweep_id: &str,
     parent_run_uid: &str,
+    on_round: impl FnMut(usize),
+    on_event: EventObserver,
 ) -> SimulationResult {
     let params = CompareSideParameters {
         side,
@@ -1209,9 +1316,10 @@ fn run_compare_side(
         cfg.llm.cache_path = None;
     }
 
-    let result = run_with_shared_client(&cfg, client).unwrap_or_else(|e| {
-        panic!("{side} run failed: {e}. In a network-free environment, pass --mock.")
-    });
+    let result =
+        run_with_shared_client_observed(&cfg, client, on_round, on_event).unwrap_or_else(|e| {
+            panic!("{side} run failed: {e}. In a network-free environment, pass --mock.")
+        });
 
     record::log_round_metrics(&mut rv, &result.round_history);
     record::log_run_scope(&mut rv, &result);
@@ -1295,7 +1403,14 @@ fn cmd_compare(args: CompareArgs) {
     println!("output: {}", parent.dir().display());
     println!("----------------------------------------------------------------------");
 
-    // --- classical side (always live; 0 LLM calls) --- //
+    // 片側ずつ別の stage にする．両側は «同じ盤面を機構だけ替えて 1 本ずつ回す»
+    // ものだが，費用は桁が違う: 古典側は 20 サイト × 100 ラウンドを 1 秒未満で
+    // 終え，LLM 側は同じ回数だけモデルを呼ぶ (既定で最大 2,000 回 ≒ 7 分)．1 つの
+    // stage にまとめれば，速い側が遅い側の見積りを引っぱる．重みではなく分ける
+    // 理由は，その «桁» が走らせる前には測れないからである．単位も片側ずつ違う —
+    // 古典側は 1 ラウンド，LLM 側は採用判断 1 回．どちらも吸収状態で早く止まる
+    // ので分母は持たない．
+    let (classical_stage, _) = share_stage(parent.unbounded_stage("classical"));
     let classical = run_compare_side(
         &args,
         "classical",
@@ -1304,7 +1419,10 @@ fn cmd_compare(args: CompareArgs) {
         &llm,
         &sweep_id,
         &parent_run_uid,
+        |_| tick_shared(&classical_stage),
+        no_observer(),
     );
+    close_shared(&classical_stage);
     println!(
         "[classical] regions={} LC={:.3} GP/N={:.3} converged={} round={} (0 LLM calls)",
         classical.final_metrics.n_stable_regions,
@@ -1320,6 +1438,7 @@ fn cmd_compare(args: CompareArgs) {
     } else {
         build_client(&llm)
     };
+    let (llm_stage, llm_observer) = share_stage(parent.unbounded_stage("llm"));
     let llm_result = run_compare_side(
         &args,
         llm_label,
@@ -1328,7 +1447,10 @@ fn cmd_compare(args: CompareArgs) {
         &llm,
         &sweep_id,
         &parent_run_uid,
+        |_| {},
+        llm_observer,
     );
+    close_shared(&llm_stage);
     println!(
         "[{}] regions={} LC={:.3} GP/N={:.3} converged={} round={} LLM_calls={} cache_hit={:.1}%",
         llm_label,

@@ -39,6 +39,30 @@ pub type SharedClient = Rc<RefCell<CultureClient>>;
 /// Shared metadata collector (cache-hit rate etc., aggregated after the run).
 pub type SharedMetadata = Rc<RefCell<MetadataCollector>>;
 
+/// Bumped once for every adoption decision the LLM is actually asked for.
+///
+/// The decision — not the round — is where the time goes. One engine tick is
+/// `events_per_step` micro-events, which defaults to the number of sites: the
+/// 10×10 default board asks the model 100 times per round, and a single call
+/// against the local Ollama (llama3.2) was measured at ~0.22s, so one round is
+/// ~22s and a 20×20 board's round is ~1m30s. A per-round counter would sit
+/// still through all of it.
+///
+/// Micro-events that find nothing to adopt (identical or fully disjoint
+/// cultures) never reach the model and cost nothing, so they are not counted:
+/// a tally that ran ahead of the calls would report a rate the run does not
+/// have.
+///
+/// Shared rather than borrowed because a mechanism enters the engine as a
+/// `Box<dyn Mechanism<_>>`, which is `'static` and so cannot hold a borrow of
+/// the caller's counter.
+pub type EventObserver = Rc<RefCell<dyn FnMut()>>;
+
+/// An observer that counts nothing, for callers that do not report progress.
+pub fn no_observer() -> EventObserver {
+    Rc::new(RefCell::new(|| {}))
+}
+
 // --------------------------------------------------------------------------- //
 // LLM-driven interaction (YuLan-OneSim variant)
 // --------------------------------------------------------------------------- //
@@ -128,6 +152,8 @@ pub struct LLMInteractionMechanism {
     metadata: SharedMetadata,
     settings: LlmSettings,
     events_per_step: usize,
+    /// Bumped once per adoption decision the model is asked for.
+    observer: EventObserver,
 }
 
 impl LLMInteractionMechanism {
@@ -138,12 +164,14 @@ impl LLMInteractionMechanism {
         metadata: SharedMetadata,
         settings: LlmSettings,
         events_per_step: usize,
+        observer: EventObserver,
     ) -> Self {
         LLMInteractionMechanism {
             client,
             metadata,
             settings,
             events_per_step: events_per_step.max(1),
+            observer,
         }
     }
 
@@ -195,6 +223,7 @@ impl LLMInteractionMechanism {
             self.metadata.borrow_mut().record(resp.metadata.clone());
             resp.text
         };
+        (self.observer.borrow_mut())();
 
         // --- apply adoption + update memory --- //
         if let Some(feat) = parse_adoption(&decision, &diffs) {

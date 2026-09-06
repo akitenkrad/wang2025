@@ -30,7 +30,8 @@ use socsim_mechanisms::AxelrodMechanism;
 use crate::config::{Config, Provider};
 use crate::llm::CultureClient;
 use crate::mechanisms::{
-    ConvergenceMechanism, LLMInteractionMechanism, SharedClient, SharedMetadata,
+    no_observer, ConvergenceMechanism, EventObserver, LLMInteractionMechanism, SharedClient,
+    SharedMetadata,
 };
 use crate::metrics::{compute_metrics, RunMetrics};
 use crate::world::CultureWorld;
@@ -151,6 +152,25 @@ pub fn run_with_shared_client(
     cfg: &Config,
     client: Option<SharedClient>,
 ) -> Result<SimulationResult, String> {
+    run_with_shared_client_observed(cfg, client, |_| {}, no_observer())
+}
+
+/// The same, calling `on_round` once per engine tick and `on_event` once per
+/// adoption decision the LLM is asked for.
+///
+/// Only a caller that reports progress uses this one. The two are separate
+/// because the cost sits in a different place on each path: the classical rule
+/// is the round, the LLM rule is the single decision inside it. Neither
+/// callback can be one closure — `on_round` is called from this function and
+/// may borrow the caller's `Stage`, while `on_event` is called from inside a
+/// mechanism, which enters the engine as a `'static` box and can only be
+/// handed a shared one.
+pub fn run_with_shared_client_observed(
+    cfg: &Config,
+    client: Option<SharedClient>,
+    mut on_round: impl FnMut(usize),
+    on_event: EventObserver,
+) -> Result<SimulationResult, String> {
     let root = cfg.seed.unwrap_or_else(rand::random);
     let events_per_step = cfg.effective_events_per_step();
 
@@ -193,6 +213,7 @@ pub fn run_with_shared_client(
                 Rc::clone(&shared_meta),
                 cfg.llm.clone(),
                 events_per_step,
+                Rc::clone(&on_event),
             )));
         }
         (_, None) => {
@@ -253,6 +274,7 @@ pub fn run_with_shared_client(
         }
         converged = *report.scratch.get::<bool>("converged").unwrap_or(&false);
         final_round = t;
+        on_round(t);
     })
     .map_err(|e| format!("simulation run failed: {e}"))?;
 
