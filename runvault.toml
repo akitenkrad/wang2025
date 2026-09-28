@@ -1,3 +1,169 @@
-# Metric descriptions are not written yet (MYTASK-3382). Until they are,
-# runvault records undeclared metrics instead of refusing them.
-require_docs = false
+# 指標が何を測っているか (runvault の宣言．rs-runvault docs/metrics.ja.md)．
+#
+# 名前は `simulation/src/record.rs` と `simulation/src/main.rs` が記録するものと一致していなければならない．
+#
+# `direction` は «値が大きいほど良いか»．模型の状態や到達量は成績ではないので
+# `none` とし，再現精度やキャッシュ効率のように評価方向が定まる量だけ `up` /
+# `down` とする．
+
+[metrics."lc"]
+meaning   = "隣接サイト間で一致する文化特徴の割合で表した局所収束度"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."gp"]
+meaning   = "安定文化領域数をサイト数の二乗で割った大域分極度"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."gp_per_agent"]
+meaning   = "安定文化領域数をサイト数で割った補助的分極度"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."n_stable_regions"]
+meaning   = "盤面上の安定文化領域の数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."max_region_size"]
+meaning   = "最大の安定文化領域に含まれるサイト数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."n_distinct_cultures"]
+meaning   = "盤面上に存在する相異なる文化ベクトルの数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."converged"]
+meaning   = "吸収状態へ収束して終わったなら 1，打ち切りなら 0"
+unit      = "boolean"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."final_round"]
+meaning   = "シミュレーションが停止したラウンド数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."llm_calls"]
+meaning   = "この run が行った LLM の呼び出し回数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."llm_cache_hits"]
+meaning   = "そのうちキャッシュで済んだ回数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."llm_cache_hit_rate"]
+meaning   = "LLM 呼び出しのうちキャッシュで済んだ割合"
+unit      = "ratio"
+direction = "up"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."n_converged"]
+meaning   = "この条件の試行のうち収束した本数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."converged_fraction"]
+meaning   = "この条件の試行のうち収束した割合"
+unit      = "ratio"
+direction = "up"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."mean_n_stable_regions"]
+meaning   = "試行群にわたる最終安定文化領域数の平均"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."mean_max_region_size"]
+meaning   = "試行群にわたる最終最大領域サイズの平均"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."mean_n_distinct_cultures"]
+meaning   = "試行群にわたる最終相異文化数の平均"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."mean_lc"]
+meaning   = "試行群にわたる最終局所収束度の平均"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."mean_gp"]
+meaning   = "試行群にわたる最終大域分極度の平均"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."mean_gp_per_agent"]
+meaning   = "試行群にわたる最終補助的分極度の平均"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."mean_final_round"]
+meaning   = "試行群にわたる停止ラウンド数の平均"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."delta_n_stable_regions"]
+meaning   = "LLM 条件の平均安定文化領域数から古典条件の値を引いた差"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."delta_lc"]
+meaning   = "LLM 条件の平均局所収束度から古典条件の値を引いた差"
+unit      = "ratio"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."delta_gp"]
+meaning   = "LLM 条件の平均大域分極度から古典条件の値を引いた差"
+unit      = "ratio"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."delta_gp_per_agent"]
+meaning   = "LLM 条件の平均補助的分極度から古典条件の値を引いた差"
+unit      = "ratio"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."delta_final_round"]
+meaning   = "LLM 条件の平均停止ラウンド数から古典条件の値を引いた差"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
