@@ -53,6 +53,9 @@ use socsim_llm::PromptCache;
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+    /// Development run: write it under results/_scratch/ so it is never synced to the vault.
+    #[arg(long, global = true)]
+    scratch: bool,
     /// Ollama 接続先 URL（指定時は環境変数 OLLAMA_HOST を上書きする）．
     #[arg(long, global = true)]
     ollama_host: Option<String>,
@@ -520,7 +523,7 @@ impl LlmTally {
 // run
 // --------------------------------------------------------------------------- //
 
-fn cmd_run(args: RunArgs) {
+fn cmd_run(args: RunArgs, scratch: bool) {
     let provider = parse_provider(&args.provider).unwrap_or_else(|e| panic!("{e}"));
     prepare_cache_dir(provider, &args.cache_path);
 
@@ -567,6 +570,7 @@ fn cmd_run(args: RunArgs) {
     // シードを書き，replicate_index を N-1 にする．根のシードは /parameters.seed．
     let recorded_seed = record::trial_seed(base_seed, args.features, args.traits, runs - 1);
     let mut options = RunOptions::new(EXPERIMENT, "run")
+        .scratch(scratch)
         .repo_id(REPO_ID)
         .domain(DOMAIN)
         .results_root(&args.output_dir)
@@ -729,7 +733,7 @@ fn cmd_run(args: RunArgs) {
 // sweep
 // --------------------------------------------------------------------------- //
 
-fn cmd_sweep(args: SweepArgs) {
+fn cmd_sweep(args: SweepArgs, scratch: bool) {
     let provider = parse_provider(&args.provider).unwrap_or_else(|e| panic!("{e}"));
     prepare_cache_dir(provider, &args.cache_path);
 
@@ -767,6 +771,7 @@ fn cmd_sweep(args: SweepArgs) {
     // base seed は /parameters.base_seed と seed_pointers 経由で execution_hash に残る．
     let parent = Run::start(
         RunOptions::new(EXPERIMENT, "sweep")
+            .scratch(scratch)
             .repo_id(REPO_ID)
             .domain(DOMAIN)
             .results_root(&args.output_dir)
@@ -839,6 +844,7 @@ fn cmd_sweep(args: SweepArgs) {
             // セルが違えば config_hash が違うので run としては別物になる．同じ条件の
             // 繰り返しは無いので replicate_index は 0．
             let mut child_options = RunOptions::new(EXPERIMENT, "sweep-point")
+                .scratch(scratch)
                 .repo_id(REPO_ID)
                 .domain(DOMAIN)
                 .results_root(&args.output_dir)
@@ -1007,7 +1013,7 @@ struct VerdictRow {
     child_run_slug: String,
 }
 
-fn cmd_reproduce(args: ReproduceArgs) {
+fn cmd_reproduce(args: ReproduceArgs, scratch: bool) {
     let provider = parse_provider(&args.provider).unwrap_or_else(|e| panic!("{e}"));
     let (runs, rounds) = if args.quick {
         (5usize, args.rounds.min(5_000))
@@ -1033,6 +1039,7 @@ fn cmd_reproduce(args: ReproduceArgs) {
 
     let parent = Run::start(
         RunOptions::new(EXPERIMENT, "reproduce")
+            .scratch(scratch)
             .repo_id(REPO_ID)
             .domain(DOMAIN)
             .results_root(&args.output_dir)
@@ -1086,6 +1093,7 @@ fn cmd_reproduce(args: ReproduceArgs) {
         };
 
         let mut child_options = RunOptions::new(EXPERIMENT, "reproduce-condition")
+            .scratch(scratch)
             .repo_id(REPO_ID)
             .domain(DOMAIN)
             .results_root(&args.output_dir)
@@ -1258,6 +1266,7 @@ fn run_compare_side(
     parent_run_uid: &str,
     on_round: impl FnMut(usize),
     on_event: EventObserver,
+    scratch: bool,
 ) -> SimulationResult {
     let params = CompareSideParameters {
         side,
@@ -1277,6 +1286,7 @@ fn run_compare_side(
     };
 
     let mut options = RunOptions::new(EXPERIMENT, "compare-side")
+        .scratch(scratch)
         .repo_id(REPO_ID)
         .domain(DOMAIN)
         .results_root(&args.output_dir)
@@ -1339,7 +1349,7 @@ fn run_compare_side(
     result
 }
 
-fn cmd_compare(args: CompareArgs) {
+fn cmd_compare(args: CompareArgs, scratch: bool) {
     let llm_provider = parse_provider(&args.llm_provider).unwrap_or_else(|e| panic!("{e}"));
     if !llm_provider.is_llm() {
         panic!(
@@ -1370,6 +1380,7 @@ fn cmd_compare(args: CompareArgs) {
     // 共通のシードは /parameters.seed と seed_pointers 経由で execution_hash に残る．
     let mut parent = Run::start(
         RunOptions::new(EXPERIMENT, "compare")
+            .scratch(scratch)
             .repo_id(REPO_ID)
             .domain(DOMAIN)
             .results_root(&args.output_dir)
@@ -1421,6 +1432,7 @@ fn cmd_compare(args: CompareArgs) {
         &parent_run_uid,
         |_| tick_shared(&classical_stage),
         no_observer(),
+        scratch,
     );
     close_shared(&classical_stage);
     println!(
@@ -1449,6 +1461,7 @@ fn cmd_compare(args: CompareArgs) {
         &parent_run_uid,
         |_| {},
         llm_observer,
+        scratch,
     );
     close_shared(&llm_stage);
     println!(
@@ -1504,13 +1517,14 @@ fn cmd_compare(args: CompareArgs) {
 
 fn main() {
     let cli = Cli::parse();
+    let scratch = cli.scratch;
     if let Some(host) = cli.ollama_host.as_deref() {
         std::env::set_var("OLLAMA_HOST", host);
     }
     match cli.command {
-        Commands::Run(args) => cmd_run(args),
-        Commands::Sweep(args) => cmd_sweep(args),
-        Commands::Reproduce(args) => cmd_reproduce(args),
-        Commands::Compare(args) => cmd_compare(args),
+        Commands::Run(args) => cmd_run(args, scratch),
+        Commands::Sweep(args) => cmd_sweep(args, scratch),
+        Commands::Reproduce(args) => cmd_reproduce(args, scratch),
+        Commands::Compare(args) => cmd_compare(args, scratch),
     }
 }

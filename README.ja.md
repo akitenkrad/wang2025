@@ -66,6 +66,11 @@ LLM **パイプライン** のオフライン (LLM 不要) スモークは scrip
 cargo run --release --example mock_smoke -- results
 ```
 
+
+## Scratch run
+
+開発中・デバッグ中・動作確認の実行には `--scratch` を付ける．run は `results/_scratch/` に作られ，同期されない．最新の scratch run は `runvault path --scratch` で取得できる．
+
 ## 結果の置き場
 
 記録は [runvault](https://github.com/akitenkrad/rs-runvault) に預けている．1 回の実行が 1 つの run ディレクトリ `results/culture-llm/<run_slug>/` になり，`config.json` (実験条件)・`run.json` (同一性・シード・lineage・`llm` ブロック)・`metrics.csv` (ラウンドごとと run 全体の数値，long 形式)・`events.jsonl` (シミュレーション 1 本につき `terminal` 1 行)・`artifacts/` (文化グリッド・スナップショット・ODD エクスポート) を持つ．掃引・再現バッチ・比較はいずれも «親 run 1 本 + セル / 条件 / 片側ごとの子 run» の形になる．run の場所は次で分かる:

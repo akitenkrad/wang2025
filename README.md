@@ -66,6 +66,11 @@ An offline (LLM-free) smoke of the LLM **pipeline** is available via a scripted 
 cargo run --release --example mock_smoke -- results
 ```
 
+
+## Scratch runs
+
+Use `--scratch` for development, debugging, and smoke-test runs. Scratch runs are created under `results/_scratch/`, are never synced to the vault, and the latest scratch run can be located with `runvault path --scratch`.
+
 ## Where the results go
 
 Recording is delegated to [runvault](https://github.com/akitenkrad/rs-runvault): one execution is one run directory, `results/culture-llm/<run_slug>/`, holding `config.json` (the conditions), `run.json` (identity, seeds, lineage, the `llm` block), `metrics.csv` (per-round and run-scope numbers, long form), `events.jsonl` (one `terminal` line per simulation) and `artifacts/` (the culture grid, the snapshots, the ODD export). A sweep, a reproduction batch and a comparison are each a parent run plus one child run per cell / condition / side. Find a run with:
