@@ -436,6 +436,7 @@ fn enumerate_range(min: usize, max: usize, step: usize) -> Vec<usize> {
 
 fn make_llm_settings(temperature: f32, llm_seed: u64, cache_path: &str) -> LlmSettings {
     LlmSettings {
+        think: None,
         temperature,
         seed: llm_seed,
         cache_path: Some(cache_path.to_string()),

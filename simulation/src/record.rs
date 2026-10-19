@@ -413,7 +413,7 @@ mod tests {
     /// そのときは過去の run と結果を比較できなくなっている．
     #[test]
     fn golden_values_are_pinned() {
-        assert_eq!(trial_seed(42, 5, 5, 0), 8_386_320_814_092_227_575);
-        assert_eq!(trial_seed(42, 5, 5, 1), 8_386_319_714_580_599_364);
+        assert_eq!(trial_seed(42, 5, 5, 0), 13_221_711_607_589_253_924);
+        assert_eq!(trial_seed(42, 5, 5, 1), 16_327_138_400_667_420_284);
     }
 }

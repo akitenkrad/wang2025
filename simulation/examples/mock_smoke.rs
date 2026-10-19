@@ -60,6 +60,7 @@ fn main() {
         provider: Provider::Ollama, // requested primary (mock client substitutes)
         seed: Some(seed),
         llm: LlmSettings {
+            think: None,
             temperature: 0.0,
             seed: 0,
             cache_path: None, // in-memory for the smoke
